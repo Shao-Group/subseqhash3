@@ -35,13 +35,19 @@ class SubseqHash3 {
     int* tableCP;
 
     int returnPivotTableIndex(int, int, int, int);
+
     void generateTables();
     void loadTables();
+
+    void solveForwardDP(string, int, int*, int*);
+    void solveReverseDP(string, int, int*, int*);
 
 public:
     SubseqHash3();
     SubseqHash3(int, int, map<char, int>);
     ~SubseqHash3();
+
+    void solvePivotDP(string, int);
 };
 
 int SubseqHash3::returnPivotTableIndex(int i, int j, int sigmaI, int sigmaJ) {
@@ -103,11 +109,11 @@ void SubseqHash3::generateTables() {
         }
     }
 
-    unsigned currentTimeBasedSeed;
+    unsigned int currentTimeBasedSeed;
 
     for(int u = 0; u < this->k; u++) {
         for(int v = 0; v < this->d; v++) {
-            currentTimeBasedSeed = unsigned(chrono::system_clock::now().time_since_epoch().count());
+            currentTimeBasedSeed = chrono::system_clock::now().time_since_epoch().count();
             shuffle(pairValues.begin(), pairValues.end(), default_random_engine(currentTimeBasedSeed));
 
             for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
@@ -115,7 +121,7 @@ void SubseqHash3::generateTables() {
                 this->tableBF2[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (uint8_t) (pairValues[sigma] >> 0) % 2;
             }
 
-            currentTimeBasedSeed = unsigned(chrono::system_clock::now().time_since_epoch().count());
+            currentTimeBasedSeed = chrono::system_clock::now().time_since_epoch().count();
             shuffle(pairValues.begin(), pairValues.end(), default_random_engine(currentTimeBasedSeed));
 
             for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
@@ -128,7 +134,7 @@ void SubseqHash3::generateTables() {
     for(int i = 0; i < this->k - 1; i++) {
         for(int j = i + 1; j < this->k; j++) {
             for(int sigmaI = 0; sigmaI < this->alphabet.size(); sigmaI++) {
-                currentTimeBasedSeed = unsigned(chrono::system_clock::now().time_since_epoch().count());
+                currentTimeBasedSeed = chrono::system_clock::now().time_since_epoch().count();
                 shuffle(tripletValues.begin(), tripletValues.end(), default_random_engine(currentTimeBasedSeed));
 
                 for(int sigmaJ = 0; sigmaJ < this->alphabet.size(); sigmaJ++) {
@@ -153,14 +159,14 @@ void SubseqHash3::generateTables() {
     }
 
     for(int u = 0; u < this->k; u++) {
-        currentTimeBasedSeed = unsigned(chrono::system_clock::now().time_since_epoch().count());
+        currentTimeBasedSeed = chrono::system_clock::now().time_since_epoch().count();
         shuffle(dValues.begin(), dValues.end(), default_random_engine(currentTimeBasedSeed));
 
         for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
             this->tableCF[u * this->alphabet.size() + sigma] = dValues[sigma];
         }
 
-        currentTimeBasedSeed = unsigned(chrono::system_clock::now().time_since_epoch().count());
+        currentTimeBasedSeed = chrono::system_clock::now().time_since_epoch().count();
         shuffle(dValues.begin(), dValues.end(), default_random_engine(currentTimeBasedSeed));
 
         for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
@@ -171,7 +177,7 @@ void SubseqHash3::generateTables() {
     for(int i = 0; i < this->k - 1; i++) {
         for(int j = i + 1; j < this->k; j++) {
             for(int sigmaI = 0; sigmaI < this->alphabet.size(); sigmaI++) {
-                currentTimeBasedSeed = unsigned(chrono::system_clock::now().time_since_epoch().count());
+                currentTimeBasedSeed = chrono::system_clock::now().time_since_epoch().count();
                 shuffle(dValues.begin(), dValues.end(), default_random_engine(currentTimeBasedSeed));
 
                 for(int sigmaJ = 0; sigmaJ < this->alphabet.size(); sigmaJ++) {
@@ -184,6 +190,52 @@ void SubseqHash3::generateTables() {
 
 void SubseqHash3::loadTables() {
 
+}
+
+void SubseqHash3::solveForwardDP(string sequence, int windowLength, int* dpFmax, int* dpFmin) {
+    int N = sequence.length(), n = windowLength;
+
+    // Base cases initialization
+    for(int w = 0; w < N - n + 1; w++) {
+        // Forward[w][0][u][v] cases
+        for(int u = 0; u < this->k + 1; u++) {
+            for(int v = 0; v < this->d; v++) {
+                dpFmin[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : POS_INF;
+                dpFmax[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : NEG_INF;
+            }
+        }
+
+        // Forward[w][s][0][v] cases
+        for(int s = 0; s < n + 1; s++) {
+            for(int v = 0; v < this->d; v++) {
+                dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : POS_INF;
+                dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : NEG_INF;
+            }
+        }
+    }
+}
+
+void SubseqHash3::solveReverseDP(string sequence, int windowLength, int* dpRmax, int* dpRmin) {
+    int N = sequence.length(), n = windowLength;
+
+    // Base cases initialization
+    for(int w = 0; w < N - n + 1; w++) {
+        // Reverse[w][0][u][v] cases
+        for(int u = 0; u < this->k + 1; u++) {
+            for(int v = 0; v < this->d; v++) {
+                dpRmin[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : POS_INF;
+                dpRmax[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : NEG_INF;
+            }
+        }
+
+        // Reverse[w][s][0][v] cases
+        for(int s = 0; s < n + 1; s++) {
+            for(int v = 0; v < this->d; v++) {
+                dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : POS_INF;
+                dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : NEG_INF;
+            }
+        }
+    }
 }
 
 SubseqHash3::SubseqHash3() : SubseqHash3(24, 11, {{'A', 0}, {'C', 1}, {'G', 2}, {'T', 3}}) {
@@ -220,30 +272,33 @@ SubseqHash3::~SubseqHash3() {
     delete[] this->tableBF2;
     delete[] this->tableCF;
 
-    this->tableAF = nullptr;
-    this->tableBF1 = nullptr;
-    this->tableBF2 = nullptr;
-    this->tableCF = nullptr;
-
     delete[] this->tableAR;
     delete[] this->tableBR1;
     delete[] this->tableBR2;
     delete[] this->tableCR;
-
-    this->tableAR = nullptr;
-    this->tableBR1 = nullptr;
-    this->tableBR2 = nullptr;
-    this->tableCR = nullptr;
 
     delete[] this->tableAP;
     delete[] this->tableBP1;
     delete[] this->tableBP2;
     delete[] this->tableBP3;
     delete[] this->tableCP;
+}
 
-    this->tableAP = nullptr;
-    this->tableBP1 = nullptr;
-    this->tableBP2 = nullptr;
-    this->tableBP3 = nullptr;
-    this->tableCP = nullptr;
+void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
+    int N = sequence.length(), n = windowLength;
+
+    int *dpFmax, *dpFmin, *dpRmax, *dpRmin;
+
+    dpFmax = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
+    dpFmin = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
+    dpRmax = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
+    dpRmin = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
+
+    solveForwardDP(sequence, windowLength, dpFmax, dpFmin);
+    solveReverseDP(sequence, windowLength, dpRmax, dpRmin);
+
+    delete[] dpFmax;
+    delete[] dpFmin;
+    delete[] dpRmax;
+    delete[] dpRmin;
 }
