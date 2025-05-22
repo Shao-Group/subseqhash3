@@ -192,47 +192,99 @@ void SubseqHash3::loadTables() {
 
 }
 
-void SubseqHash3::solveForwardDP(string sequence, int windowLength, int* dpFmax, int* dpFmin) {
+void SubseqHash3::solveForwardDP(string sequence, int windowLength, int* dpFmin, int* dpFmax) {
     int N = sequence.length(), n = windowLength;
 
-    // Base cases initialization
-    for(int w = 0; w < N - n + 1; w++) {
-        // Forward[w][0][u][v] cases
-        for(int u = 0; u < this->k + 1; u++) {
-            for(int v = 0; v < this->d; v++) {
-                dpFmin[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : POS_INF;
-                dpFmax[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : NEG_INF;
+    // Base case initialization: Forward[w][s][0][0] = 0 else Forward[w][s][u][v] = NaN
+    for(int w = 0; w < N; w++) {
+        for(int s = 0; s < n + 1; s++) {
+            for(int u = 0; u < this->k + 1; u++) {
+                for(int v = 0; v < this->d; v++) {
+                    dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : POS_INF;
+                    dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : NEG_INF;
+                }
             }
         }
+    }
 
-        // Forward[w][s][0][v] cases
-        for(int s = 0; s < n + 1; s++) {
-            for(int v = 0; v < this->d; v++) {
-                dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : POS_INF;
-                dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : NEG_INF;
+    // DP table population: Fmin and Fmax
+    for(int w = 0; w < N; w++) {
+        for(int s = 1; s <= min(n, N - w); s++) {
+            for(int u = 1; u <= min(this->k, N - w); u++) {
+                for(int v = 0; v < this->d; v++) {
+                    int dpFoption1, dpFoption2, vF = (v - this->tableCF[(u - 1) * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + this->d) % this->d;
+                    
+                    // Solving Fmin[w][s][u][v]
+                    dpFoption1 = dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+
+                    dpFoption2 = this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]];
+                    dpFoption2 += (this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF] : -dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF];
+
+                    dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = min(dpFoption1, dpFoption2);
+
+                    // Solving Fmax[w][s][u][v]
+                    dpFoption1 = dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+
+                    dpFoption2 = this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]];
+                    dpFoption2 += (this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF] : -dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF];
+
+                    dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = max(dpFoption1, dpFoption2);
+                }
             }
         }
     }
 }
 
-void SubseqHash3::solveReverseDP(string sequence, int windowLength, int* dpRmax, int* dpRmin) {
+void SubseqHash3::solveReverseDP(string sequence, int windowLength, int* dpRmin, int* dpRmax) {
     int N = sequence.length(), n = windowLength;
 
-    // Base cases initialization
-    for(int w = 0; w < N - n + 1; w++) {
-        // Reverse[w][0][u][v] cases
-        for(int u = 0; u < this->k + 1; u++) {
-            for(int v = 0; v < this->d; v++) {
-                dpRmin[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : POS_INF;
-                dpRmax[w * (n + 1) * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : NEG_INF;
+    // Base case initialization: Reverse[w][s][0][0] = 0 else Reverse[w][s][u][v] = NaN
+    for(int w = 0; w < N; w++) {
+        for(int s = 0; s < n + 1; s++) {
+            for(int u = 0; u < this->k + 1; u++) {
+                for(int v = 0; v < this->d; v++) {
+                    dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : POS_INF;
+                    dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = (u == 0 && v == 0) ? 0 : NEG_INF;
+                }
             }
         }
+    }
 
-        // Reverse[w][s][0][v] cases
-        for(int s = 0; s < n + 1; s++) {
-            for(int v = 0; v < this->d; v++) {
-                dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : POS_INF;
-                dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + v] = (v == 0) ? 0 : NEG_INF;
+    // DP table population: Rmin and Rmax
+    for(int w = N - 1; w >= 0; w--) {
+        for(int s = 1; s <= min(n, N - w); s++) {
+            for(int u = 1; u <= min(this->k, N - w); u++) {
+                for(int v = 0; v < this->d; v++) {
+                    int dpRoption1, dpRoption2, vR = (v - this->tableCR[(u - 1) * this->alphabet.size() + this->alphabet[sequence[w]]] + this->d) % this->d;
+
+                    // Solving Rmin[w][s][u][v]
+                    if(w == N - 1) {
+                        // Special case: Rmin[N][1][1][v] = Rmin[N+1][0][1][v] -> NaN (1 length subseq from 0 length substr) or +Rmin/-Rmax[N+1][0][0][vR] -> Reverse[N+1][0][0][vR]=0 if vR=0 else NaN (0 length subseq with psi=0 from 0 length substr)
+                        dpRoption1 = POS_INF;
+                        dpRoption2 = (vR == 0) ? this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] : POS_INF;
+                    } else {
+                        dpRoption1 = dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+
+                        dpRoption2 = this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]];
+                        dpRoption2 += (this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR] : -dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR];
+                    }
+
+                    dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = min(dpRoption1, dpRoption2);
+
+                    // Solving Rmax[w][s][u][v]
+                    if(w == N - 1) {
+                        // Special case: Rmax[N][1][1][v] = Rmax[N+1][0][1][v] -> NaN (1 length subseq from 0 length substr) or +Rmax/-Rmin[N+1][0][0][vR] -> Reverse[N+1][0][0][vR]=0 if vR=0 else NaN (0 length subseq with psi=0 from 0 length substr)
+                        dpRoption1 = NEG_INF;
+                        dpRoption2 = (vR == 0) ? this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] : NEG_INF;
+                    } else {
+                        dpRoption1 = dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+
+                        dpRoption2 = this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]];
+                        dpRoption2 += (this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR] : -dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR];
+                    }
+
+                    dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v] = max(dpRoption1, dpRoption2);
+                }
             }
         }
     }
@@ -287,18 +339,19 @@ SubseqHash3::~SubseqHash3() {
 void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     int N = sequence.length(), n = windowLength;
 
-    int *dpFmax, *dpFmin, *dpRmax, *dpRmin;
+    int *dpFmin, *dpFmax, *dpRmin, *dpRmax;
 
-    dpFmax = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
-    dpFmin = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
-    dpRmax = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
-    dpRmin = new int[(N - n + 1) * (n + 1) * (this->k + 1) * this->d];
+    // Fmin, Fmax, Rmin, and Rmax have a dimesion of [N][n+1][k+1][d]
+    dpFmin = new int[N * (n + 1) * (this->k + 1) * this->d];
+    dpFmax = new int[N * (n + 1) * (this->k + 1) * this->d];
+    dpRmin = new int[N * (n + 1) * (this->k + 1) * this->d];
+    dpRmax = new int[N * (n + 1) * (this->k + 1) * this->d];
 
-    solveForwardDP(sequence, windowLength, dpFmax, dpFmin);
-    solveReverseDP(sequence, windowLength, dpRmax, dpRmin);
+    solveForwardDP(sequence, windowLength, dpFmin, dpFmax);
+    solveReverseDP(sequence, windowLength, dpRmin, dpRmax);
 
-    delete[] dpFmax;
     delete[] dpFmin;
-    delete[] dpRmax;
+    delete[] dpFmax;
     delete[] dpRmin;
+    delete[] dpRmax;
 }
