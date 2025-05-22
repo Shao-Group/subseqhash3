@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -46,7 +47,7 @@ public:
     SubseqHash3();
     SubseqHash3(int, int, map<char, int>);
     ~SubseqHash3();
-    
+
     int getK() const;
     int getD() const;
     map<char, int> getAlphabet() const;
