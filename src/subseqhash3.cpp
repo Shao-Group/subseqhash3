@@ -420,3 +420,8 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     delete[] dpRmin;
     delete[] dpRmax;
 }
+
+int main(int argc, char** argv) {
+    
+    return 0;
+}
