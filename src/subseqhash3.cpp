@@ -46,6 +46,10 @@ public:
     SubseqHash3();
     SubseqHash3(int, int, map<char, int>);
     ~SubseqHash3();
+    
+    int getK() const;
+    int getD() const;
+    map<char, int> getAlphabet() const;
 
     void solvePivotDP(string, int);
 };
@@ -336,6 +340,18 @@ SubseqHash3::~SubseqHash3() {
     delete[] this->tableCP;
 }
 
+int SubseqHash3::getK() const {
+    return this->k;
+}
+
+int SubseqHash3::getD() const {
+    return this->d;
+}
+
+map<char, int> SubseqHash3::getAlphabet() const {
+    return this->alphabet;
+}
+
 void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     int N = sequence.length(), n = windowLength;
 
@@ -422,6 +438,7 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
 }
 
 int main(int argc, char** argv) {
-    
+    SubseqHash3 subseqhash3(3, 5, {{'A', 0}, {'C', 1}, {'G', 2}, {'T', 3}});
+    subseqhash3.solvePivotDP("ACGTAC", 5);
     return 0;
 }
