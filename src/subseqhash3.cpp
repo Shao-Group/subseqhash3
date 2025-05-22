@@ -1,12 +1,12 @@
-#include<algorithm>
-#include<chrono>
-#include<fstream>
-#include<iostream>
-#include<limits>
-#include<map>
-#include<random>
-#include<string>
-#include<vector>
+#include <algorithm>
+#include <chrono>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <random>
+#include <string>
+#include <vector>
 
 using namespace std;
 
@@ -341,7 +341,7 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
 
     int *dpFmin, *dpFmax, *dpRmin, *dpRmax;
 
-    // Fmin, Fmax, Rmin, and Rmax have a dimesion of [N][n+1][k+1][d]
+    // Fmin, Fmax, Rmin, and Rmax have a dimension of [N][n+1][k+1][d]
     dpFmin = new int[N * (n + 1) * (this->k + 1) * this->d];
     dpFmax = new int[N * (n + 1) * (this->k + 1) * this->d];
     dpRmin = new int[N * (n + 1) * (this->k + 1) * this->d];
@@ -349,6 +349,71 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
 
     solveForwardDP(sequence, windowLength, dpFmin, dpFmax);
     solveReverseDP(sequence, windowLength, dpRmin, dpRmax);
+
+    // Psi and Omega have a dimension of [N - n + 1][n][n][k][k]
+    int psi[N - n + 1][n][n][this->k][this->k], omega[N - n + 1][n][n][this->k][this->k];
+
+    // Psi and Omega initialization with d and NaN, respectively
+    for(int w = 0; w < N - n + 1; w++) {
+        for(int a = 0; a < n; a++) {
+            for(int b = 0; b < n; b++) {
+                for(int i = 0; i < this->k; i++) {
+                    for(int j = 0; j < this->k; j++) {
+                        psi[w][a][b][i][j] = this->d;
+                        omega[w][a][b][i][j] = NEG_INF;
+                    }
+                }
+            }
+        }
+    }
+
+    // Psi table population
+    for(int w = 0; w < N - n + 1; w++) {
+        for(int a = 1; a < n; a++) {
+            for(int b = a + 1; b <= n; b++) {
+                for(int i = 1; i < this->k; i++) {
+                    for(int j = i + 1; j <= this->k; j++) {
+                        // Finding minimum psi from all possible combinations of v1, v2, and v3 that satisfy constraints
+                        for(int v1 = 0; v1 < this->d; v1++) {
+                            for(int v2 = 0; v2 < this->d; v2++) {
+                                for(int v3 = 0; v3 < this->d; v3++) {
+                                    if(dpRmin[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1] < POS_INF && dpFmin[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2] < POS_INF && dpRmin[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3] < POS_INF) {
+                                        psi[w][a - 1][b - 1][i - 1][j - 1] = min(psi[w][a - 1][b - 1][i - 1][j - 1], (this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + v1 + v2 + v3) % this->d);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Omega table popultation
+    for(int w = 0; w < N - n + 1; w++) {
+        for(int a = 1; a < n; a++) {
+            for(int b = a + 1; b <= n; b++) {
+                for(int i = 1; i < this->k; i++) {
+                    for(int j = i + 1; j <= this->k; j++) {
+                        // Finding maximum omega from all possible combinations of v1 and v2
+                        for(int v1 = 0; v1 < this->d; v1++) {
+                            for(int v2 = 0; v2 < this->d; v2++) {
+                                int v3, reverse1, forward2, reverse3;
+
+                                v3 = (psi[w][a - 1][b - 1][i - 1][j - 1] - this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] - v1 - v2 + this->d) % this->d;
+
+                                reverse1 = (this->tableBP1[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) ? dpRmax[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1] : -dpRmin[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1];
+                                forward2 = (this->tableBP2[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) ? dpFmax[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2] : -dpFmin[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2];
+                                reverse3 = (this->tableBP3[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) ? dpRmax[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3] : -dpRmin[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3];
+
+                                omega[w][a - 1][b - 1][i - 1][j - 1] = max(omega[w][a - 1][b - 1][i - 1][j - 1], this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverse1 + forward2 + reverse3);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     delete[] dpFmin;
     delete[] dpFmax;
