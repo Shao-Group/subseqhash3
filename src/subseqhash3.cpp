@@ -350,7 +350,7 @@ void SubseqHash3::solveReverseDP(string sequence, int windowLength, BaseDPCell* 
                         } else {
                             // Add X[w] to seed but condition applies (vR must be equal to 0, in other words, 0-length subseq from previous subproblem must have psi-value of 0)
                             dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + "" : sequence[w] + "X";
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + string("") : sequence[w] + string("X");
                             dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
                         }
                     } else {
@@ -389,7 +389,7 @@ void SubseqHash3::solveReverseDP(string sequence, int windowLength, BaseDPCell* 
                         } else {
                             // Add X[w] to seed but condition applies (vR must be equal to 0, in other words, 0-length subseq from previous subproblem must have psi-value of 0)
                             dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + "" : sequence[w] + "X";
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + string("") : sequence[w] + string("X");
                             dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
                         }
                     } else {
@@ -546,7 +546,7 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
                                 int v3, reverseFracOmega1, forwardFracOmega2, reverseFracOmega3;
                                 string reverseFracSeed1, forwardFracSeed2, reverseFracSeed3;
 
-                                v3 = (psi[w][a - 1][b - 1][i - 1][j - 1] - this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] - v1 - v2 + this->d) % this->d;
+                                v3 = (psi[w][a - 1][b - 1][i - 1][j - 1] - this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] - v1 - v2 + 3 * this->d) % this->d;
 
                                 if(this->tableBP1[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) {
                                     reverseFracOmega1 = dpRmax[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega;
