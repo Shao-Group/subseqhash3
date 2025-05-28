@@ -492,6 +492,7 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     solveReverseDP(sequence, windowLength, dpRmin, dpRmax);
 
     // Psi and Omega have a dimension of [N - n + 1][n][n][k][k]
+    // [future task] We may want to switch to dynamically allocated arrays with non-trivial access to avoid storing unused array cells
     int psi[N - n + 1][n][n][this->k][this->k];
     PivotDPCell omega[N - n + 1][n][n][this->k][this->k];
 
@@ -542,15 +543,39 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
                         // Finding maximum omega from all possible combinations of v1 and v2
                         for(int v1 = 0; v1 < this->d; v1++) {
                             for(int v2 = 0; v2 < this->d; v2++) {
-                                int v3, reverse1, forward2, reverse3;
+                                int v3, reverseFracOmega1, forwardFracOmega2, reverseFracOmega3;
+                                string reverseFracSeed1, forwardFracSeed2, reverseFracSeed3;
 
                                 v3 = (psi[w][a - 1][b - 1][i - 1][j - 1] - this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] - v1 - v2 + this->d) % this->d;
-                                
-                                reverse1 = (this->tableBP1[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) ? dpRmax[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega : -dpRmin[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega;
-                                forward2 = (this->tableBP2[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) ? dpFmax[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracOmega : -dpFmin[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracOmega;
-                                reverse3 = (this->tableBP3[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) ? dpRmax[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3].fracOmega : -dpRmin[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3].fracOmega;
 
-                                omega[w][a - 1][b - 1][i - 1][j - 1].omega = max(omega[w][a - 1][b - 1][i - 1][j - 1].omega, this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverse1 + forward2 + reverse3);
+                                if(this->tableBP1[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) {
+                                    reverseFracOmega1 = dpRmax[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega;
+                                    reverseFracSeed1 = dpRmax[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracSeed;
+                                } else {
+                                    reverseFracOmega1 = -dpRmin[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega;
+                                    reverseFracSeed1 = dpRmin[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracSeed;
+                                }
+
+                                if(this->tableBP2[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) {
+                                    forwardFracOmega2 = dpFmax[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracOmega;
+                                    forwardFracSeed2 = dpFmax[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracSeed;
+                                } else {
+                                    forwardFracOmega2 = -dpFmin[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracOmega;
+                                    forwardFracSeed2 = dpFmin[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracSeed;
+                                }
+
+                                if(this->tableBP3[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) {
+                                    reverseFracOmega3 = dpRmax[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3].fracOmega;
+                                    reverseFracSeed3 = dpRmax[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3].fracSeed;
+                                } else {
+                                    reverseFracOmega3 = -dpRmin[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3].fracOmega;
+                                    reverseFracSeed3 = dpRmin[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (k - j) * this->d + v3].fracSeed;
+                                }
+
+                                if(omega[w][a - 1][b - 1][i - 1][j - 1].omega < this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverseFracOmega1 + forwardFracOmega2 + reverseFracOmega3) {
+                                    omega[w][a - 1][b - 1][i - 1][j - 1].omega = this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverseFracOmega1 + forwardFracOmega2 + reverseFracOmega3;
+                                    omega[w][a - 1][b - 1][i - 1][j - 1].seed = reverseFracSeed1 + sequence[w + a - 1] + forwardFracSeed2 + sequence[w + b - 1] + reverseFracSeed3;
+                                }
                             }
                         }
                     }
@@ -563,6 +588,35 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     delete[] dpFmax;
     delete[] dpRmin;
     delete[] dpRmax;
+
+    // Pi has a dimension of [N - n + 1][k][k]
+    // [future task] We may want to switch to a dynamically allocated array with non-trivial access to avoid storing unused array cells
+    PiCell pi[N - n + 1][this->k][this->k];
+
+    for(int w = 0; w < N - n + 1; w++) {
+        for(int i = 0; i < this->k - 1; i++) {
+            for(int j = i + 1; j < this->k; j++) {
+                // Finding optimal seed from all possible combinations of pivot positions a and b
+                for(int a = 0; a < n - 1; a++) {
+                    for(int b = a + 1; b < n; b++) {
+                        if(a == 0 && b == 1) {
+                            pi[w][i][j].psi = &psi[w][a][b][i][j];
+                            pi[w][i][j].seedData = &omega[w][a][b][i][j];
+                            pi[w][i][j].optimalA = a;
+                            pi[w][i][j].optimalB = b;
+                        } else {
+                            if(*pi[w][i][j].psi > psi[w][a][b][i][j] || (*pi[w][i][j].psi == psi[w][a][b][i][j] && pi[w][i][j].seedData->omega < omega[w][a][b][i][j].omega)) {
+                                pi[w][i][j].psi = &psi[w][a][b][i][j];
+                                pi[w][i][j].seedData = &omega[w][a][b][i][j];
+                                pi[w][i][j].optimalA = a;
+                                pi[w][i][j].optimalB = b;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 int main(int argc, char** argv) {
