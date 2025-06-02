@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -55,7 +56,6 @@ class SubseqHash3 {
 
     int returnPivotTableIndex(int, int, int, int);
 
-    void generateTables();
     void loadTables();
 
     void solveForwardDP(string, int, BaseDPCell*, BaseDPCell*);
@@ -65,6 +65,8 @@ public:
     SubseqHash3();
     SubseqHash3(int, int, map<char, int>);
     ~SubseqHash3();
+
+    void generateTables();
 
     int getK() const;
     int getD() const;
@@ -209,6 +211,8 @@ void SubseqHash3::generateTables() {
             }
         }
     }
+
+    string tablesDirectoryPath = string("..") + filesystem::path::preferred_separator + string("tables");
 }
 
 void SubseqHash3::loadTables() {
