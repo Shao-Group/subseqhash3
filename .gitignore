@@ -1,0 +1,9 @@
+# Ignore everything in this repository initially
+*
+
+# Now add files and folders that should be tracked
+!.gitignore
+!*.md
+!*.hpp
+!*.cpp
+!tables/
