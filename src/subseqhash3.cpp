@@ -1,79 +1,4 @@
-#include <algorithm>
-#include <chrono>
-#include <cstdint>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <map>
-#include <random>
-#include <string>
-#include <vector>
-
-using namespace std;
-
-#define POS_INF numeric_limits<int>::max()
-#define NEG_INF numeric_limits<int>::min()
-
-struct BaseDPCell {
-    int fracOmega;
-    string fracSeed;
-    BaseDPCell* prevSubproblem;
-};
-
-struct PivotDPCell {
-    int omega;
-    string seed;
-};
-
-struct PiCell {
-    int* psi;
-    PivotDPCell* seedData;
-    int optimalA;
-    int optimalB;
-};
-
-class SubseqHash3 {
-    int k;
-    int d;
-    map<char, int> alphabet;
-
-    int* tableAF;
-    int* tableBF1;
-    int* tableBF2;
-    int* tableCF;
-
-    int* tableAR;
-    int* tableBR1;
-    int* tableBR2;
-    int* tableCR;
-
-    int* tableAP;
-    int* tableBP1;
-    int* tableBP2;
-    int* tableBP3;
-    int* tableCP;
-
-    int returnPivotTableIndex(int, int, int, int);
-
-    void solveForwardDP(string, int, BaseDPCell*, BaseDPCell*);
-    void solveReverseDP(string, int, BaseDPCell*, BaseDPCell*);
-
-public:
-    SubseqHash3();
-    SubseqHash3(int, int, map<char, int>);
-    ~SubseqHash3();
-
-    void generateTables();
-    void loadTables();
-
-    int getK() const;
-    int getD() const;
-    map<char, int> getAlphabet() const;
-
-    void solvePivotDP(string, int);
-};
+#include "subseqhash3.hpp"
 
 int SubseqHash3::returnPivotTableIndex(int i, int j, int sigmaI, int sigmaJ) {
     int pivotTableIndex = 0;
@@ -86,6 +11,254 @@ int SubseqHash3::returnPivotTableIndex(int i, int j, int sigmaI, int sigmaJ) {
     pivotTableIndex += sigmaI * this->alphabet.size() + sigmaJ;
 
     return pivotTableIndex;
+}
+
+void SubseqHash3::solveForwardDP(string sequence, int windowLength, BaseDPCell* dpFmin, BaseDPCell* dpFmax) {
+    int N = sequence.length(), n = windowLength;
+
+    // Base case initialization: Forward[w][s][0][0] = 0 (as long as [s] within window starting from [w]) else Forward[w][s][u][v] = NaN
+    for(int w = 0; w < N; w++) {
+        for(int s = 0; s < n + 1; s++) {
+            for(int u = 0; u < this->k + 1; u++) {
+                for(int v = 0; v < this->d; v++) {
+                    if(s <= N - w && u == 0 && v == 0) {
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                    } else {
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = POS_INF;
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = NEG_INF;
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                    }
+                }
+            }
+        }
+    }
+
+    // DP table population: Fmin and Fmax
+    for(int w = 0; w < N; w++) {
+        for(int s = 1; s <= min(n, N - w); s++) {
+            for(int u = 1; u <= min(this->k, N - w); u++) {
+                for(int v = 0; v < this->d; v++) {
+                    int dpFoption1, dpFoption2, vF = (v - this->tableCF[(u - 1) * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + this->d) % this->d;
+
+                    // Solving Fmin[w][s][u][v]
+                    dpFoption1 = dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
+
+                    if(this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) {
+                        dpFoption2 = (dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega < POS_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : POS_INF;
+                    } else {
+                        dpFoption2 = (dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega > NEG_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + -dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : POS_INF;
+                    }
+
+                    if(dpFoption1 < dpFoption2) {
+                        // Do not add X[w + s - 1] to seed
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption1;
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed + string("");
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+                    } else {
+                        // Add X[w + s - 1] to seed
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption2;
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = ((this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed : dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed) + sequence[w + s - 1];
+                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? &dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF] : &dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF];
+                    }
+
+                    // Solving Fmax[w][s][u][v]
+                    dpFoption1 = dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
+
+                    if(this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) {
+                        dpFoption2 = (dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega > NEG_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : NEG_INF;
+                    } else {
+                        dpFoption2 = (dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega < POS_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + -dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : NEG_INF;
+                    }
+
+                    if(dpFoption1 > dpFoption2) {
+                        // Do not add X[w + s - 1] to seed
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption1;
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed + string("");
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+                    } else {
+                        // Add X[w + s - 1] to seed
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption2;
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = ((this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed : dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed) + sequence[w + s - 1];
+                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? &dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF] : &dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF];
+                    }
+                }
+            }
+        }
+    }
+}
+
+void SubseqHash3::solveReverseDP(string sequence, int windowLength, BaseDPCell* dpRmin, BaseDPCell* dpRmax) {
+    int N = sequence.length(), n = windowLength;
+
+    // Base case initialization: Reverse[w][s][0][0] = 0 (as long as [s] within window starting from [w]) else Reverse[w][s][u][v] = NaN
+    for(int w = 0; w < N; w++) {
+        for(int s = 0; s < n + 1; s++) {
+            for(int u = 0; u < this->k + 1; u++) {
+                for(int v = 0; v < this->d; v++) {
+                    if(s <= N - w && u == 0 && v == 0) {
+                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
+                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
+                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+
+                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
+                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
+                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                    } else {
+                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = POS_INF;
+                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
+                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+
+                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = NEG_INF;
+                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
+                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                    }
+                }
+            }
+        }
+    }
+
+    // DP table population: Rmin and Rmax
+    for(int w = N - 1; w >= 0; w--) {
+        for(int s = 1; s <= min(n, N - w); s++) {
+            for(int u = 1; u <= min(this->k, N - w); u++) {
+                for(int v = 0; v < this->d; v++) {
+                    int dpRoption1, dpRoption2, vR = (v - this->tableCR[(u - 1) * this->alphabet.size() + this->alphabet[sequence[w]]] + this->d) % this->d;
+
+                    // Solving Rmin[w][s][u][v]
+                    if(w == N - 1) {
+                        // Special case: Rmin[N][1][1][v] = Rmin[N+1][0][1][v] -> NaN (1 length subseq from 0 length substr) or +Rmin/-Rmax[N+1][0][0][vR] -> Reverse[N+1][0][0][vR]=0 if vR=0 else NaN (0 length subseq with psi=0 from 0 length substr)
+                        dpRoption1 = POS_INF;
+                        dpRoption2 = (vR == 0) ? this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] : POS_INF;
+
+                        if(dpRoption1 < dpRoption2) {
+                            // Do not add X[w] to seed
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                        } else {
+                            // Add X[w] to seed but condition applies (vR must be equal to 0, in other words, 0-length subseq from previous subproblem must have psi-value of 0)
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + string("") : sequence[w] + string("X");
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                        }
+                    } else {
+                        dpRoption1 = dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
+
+                        if(this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) {
+                            dpRoption2 = (dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega < POS_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : POS_INF;
+                        } else {
+                            dpRoption2 = (dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega > NEG_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + -dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : POS_INF;
+                        }
+
+                        if(dpRoption1 < dpRoption2) {
+                            // Do not add X[w] to seed
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("") + dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed;
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+                        } else {
+                            // Add X[w] to seed
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = sequence[w] + ((this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed : dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed);
+                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? &dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR] : &dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR];
+                        }
+                    }
+
+                    // Solving Rmax[w][s][u][v]
+                    if(w == N - 1) {
+                        // Special case: Rmax[N][1][1][v] = Rmax[N+1][0][1][v] -> NaN (1 length subseq from 0 length substr) or +Rmax/-Rmin[N+1][0][0][vR] -> Reverse[N+1][0][0][vR]=0 if vR=0 else NaN (0 length subseq with psi=0 from 0 length substr)
+                        dpRoption1 = NEG_INF;
+                        dpRoption2 = (vR == 0) ? this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] : NEG_INF;
+
+                        if(dpRoption1 > dpRoption2) {
+                            // Do not add X[w] to seed
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                        } else {
+                            // Add X[w] to seed but condition applies (vR must be equal to 0, in other words, 0-length subseq from previous subproblem must have psi-value of 0)
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + string("") : sequence[w] + string("X");
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
+                        }
+                    } else {
+                        dpRoption1 = dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
+
+                        if(this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) {
+                            dpRoption2 = (dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega > NEG_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : NEG_INF;
+                        } else {
+                            dpRoption2 = (dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega < POS_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + -dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : NEG_INF;
+                        }
+
+                        if(dpRoption1 > dpRoption2) {
+                            // Do not add X[w] to seed
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("") + dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed;
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
+                        } else {
+                            // Add X[w] to seed
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = sequence[w] + ((this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed : dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed);
+                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? &dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR] : &dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+SubseqHash3::SubseqHash3() : SubseqHash3(24, 11, {{'A', 0}, {'C', 1}, {'G', 2}, {'T', 3}}) {
+    // Parameterized constructor is called from default constructor with default arguments
+}
+
+SubseqHash3::SubseqHash3(int k, int d, map<char, int> alphabet) {
+    this->k = k;
+    this->d = d;
+    this->alphabet = alphabet;
+
+    this->tableAF = new int[k * d * alphabet.size()];
+    this->tableBF1 = new int[k * d * alphabet.size()];
+    this->tableBF2 = new int[k * d * alphabet.size()];
+    this->tableCF = new int[k * alphabet.size()];
+
+    this->tableAR = new int[k * d * alphabet.size()];
+    this->tableBR1 = new int[k * d * alphabet.size()];
+    this->tableBR2 = new int[k * d * alphabet.size()];
+    this->tableCR = new int[k * alphabet.size()];
+
+    this->tableAP = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+    this->tableBP1 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+    this->tableBP2 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+    this->tableBP3 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+    this->tableCP = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+}
+
+SubseqHash3::~SubseqHash3() {
+    delete[] this->tableAF;
+    delete[] this->tableBF1;
+    delete[] this->tableBF2;
+    delete[] this->tableCF;
+
+    delete[] this->tableAR;
+    delete[] this->tableBR1;
+    delete[] this->tableBR2;
+    delete[] this->tableCR;
+
+    delete[] this->tableAP;
+    delete[] this->tableBP1;
+    delete[] this->tableBP2;
+    delete[] this->tableBP3;
+    delete[] this->tableCP;
 }
 
 void SubseqHash3::generateTables() {
@@ -547,254 +720,6 @@ void SubseqHash3::loadTables() {
     tablesFile.close();
 }
 
-void SubseqHash3::solveForwardDP(string sequence, int windowLength, BaseDPCell* dpFmin, BaseDPCell* dpFmax) {
-    int N = sequence.length(), n = windowLength;
-
-    // Base case initialization: Forward[w][s][0][0] = 0 (as long as [s] within window starting from [w]) else Forward[w][s][u][v] = NaN
-    for(int w = 0; w < N; w++) {
-        for(int s = 0; s < n + 1; s++) {
-            for(int u = 0; u < this->k + 1; u++) {
-                for(int v = 0; v < this->d; v++) {
-                    if(s <= N - w && u == 0 && v == 0) {
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                    } else {
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = POS_INF;
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = NEG_INF;
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                    }
-                }
-            }
-        }
-    }
-
-    // DP table population: Fmin and Fmax
-    for(int w = 0; w < N; w++) {
-        for(int s = 1; s <= min(n, N - w); s++) {
-            for(int u = 1; u <= min(this->k, N - w); u++) {
-                for(int v = 0; v < this->d; v++) {
-                    int dpFoption1, dpFoption2, vF = (v - this->tableCF[(u - 1) * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + this->d) % this->d;
-
-                    // Solving Fmin[w][s][u][v]
-                    dpFoption1 = dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
-
-                    if(this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) {
-                        dpFoption2 = (dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega < POS_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : POS_INF;
-                    } else {
-                        dpFoption2 = (dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega > NEG_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + -dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : POS_INF;
-                    }
-
-                    if(dpFoption1 < dpFoption2) {
-                        // Do not add X[w + s - 1] to seed
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption1;
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed + string("");
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
-                    } else {
-                        // Add X[w + s - 1] to seed
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption2;
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = ((this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed : dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed) + sequence[w + s - 1];
-                        dpFmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? &dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF] : &dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF];
-                    }
-
-                    // Solving Fmax[w][s][u][v]
-                    dpFoption1 = dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
-
-                    if(this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) {
-                        dpFoption2 = (dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega > NEG_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : NEG_INF;
-                    } else {
-                        dpFoption2 = (dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega < POS_INF) ? (this->tableAF[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] * this->tableBF2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] + -dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracOmega) : NEG_INF;
-                    }
-
-                    if(dpFoption1 > dpFoption2) {
-                        // Do not add X[w + s - 1] to seed
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption1;
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed + string("");
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
-                    } else {
-                        // Add X[w + s - 1] to seed
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpFoption2;
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = ((this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed : dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF].fracSeed) + sequence[w + s - 1];
-                        dpFmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBF1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w + s - 1]]] == 1) ? &dpFmax[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF] : &dpFmin[w * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vF];
-                    }
-                }
-            }
-        }
-    }
-}
-
-void SubseqHash3::solveReverseDP(string sequence, int windowLength, BaseDPCell* dpRmin, BaseDPCell* dpRmax) {
-    int N = sequence.length(), n = windowLength;
-
-    // Base case initialization: Reverse[w][s][0][0] = 0 (as long as [s] within window starting from [w]) else Reverse[w][s][u][v] = NaN
-    for(int w = 0; w < N; w++) {
-        for(int s = 0; s < n + 1; s++) {
-            for(int u = 0; u < this->k + 1; u++) {
-                for(int v = 0; v < this->d; v++) {
-                    if(s <= N - w && u == 0 && v == 0) {
-                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
-                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
-                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-
-                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = 0;
-                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("");
-                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                    } else {
-                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = POS_INF;
-                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
-                        dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-
-                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = NEG_INF;
-                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
-                        dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                    }
-                }
-            }
-        }
-    }
-
-    // DP table population: Rmin and Rmax
-    for(int w = N - 1; w >= 0; w--) {
-        for(int s = 1; s <= min(n, N - w); s++) {
-            for(int u = 1; u <= min(this->k, N - w); u++) {
-                for(int v = 0; v < this->d; v++) {
-                    int dpRoption1, dpRoption2, vR = (v - this->tableCR[(u - 1) * this->alphabet.size() + this->alphabet[sequence[w]]] + this->d) % this->d;
-
-                    // Solving Rmin[w][s][u][v]
-                    if(w == N - 1) {
-                        // Special case: Rmin[N][1][1][v] = Rmin[N+1][0][1][v] -> NaN (1 length subseq from 0 length substr) or +Rmin/-Rmax[N+1][0][0][vR] -> Reverse[N+1][0][0][vR]=0 if vR=0 else NaN (0 length subseq with psi=0 from 0 length substr)
-                        dpRoption1 = POS_INF;
-                        dpRoption2 = (vR == 0) ? this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] : POS_INF;
-
-                        if(dpRoption1 < dpRoption2) {
-                            // Do not add X[w] to seed
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                        } else {
-                            // Add X[w] to seed but condition applies (vR must be equal to 0, in other words, 0-length subseq from previous subproblem must have psi-value of 0)
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + string("") : sequence[w] + string("X");
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                        }
-                    } else {
-                        dpRoption1 = dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
-
-                        if(this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) {
-                            dpRoption2 = (dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega < POS_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : POS_INF;
-                        } else {
-                            dpRoption2 = (dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega > NEG_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + -dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : POS_INF;
-                        }
-
-                        if(dpRoption1 < dpRoption2) {
-                            // Do not add X[w] to seed
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("") + dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed;
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
-                        } else {
-                            // Add X[w] to seed
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = sequence[w] + ((this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed : dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed);
-                            dpRmin[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? &dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR] : &dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR];
-                        }
-                    }
-
-                    // Solving Rmax[w][s][u][v]
-                    if(w == N - 1) {
-                        // Special case: Rmax[N][1][1][v] = Rmax[N+1][0][1][v] -> NaN (1 length subseq from 0 length substr) or +Rmax/-Rmin[N+1][0][0][vR] -> Reverse[N+1][0][0][vR]=0 if vR=0 else NaN (0 length subseq with psi=0 from 0 length substr)
-                        dpRoption1 = NEG_INF;
-                        dpRoption2 = (vR == 0) ? this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] : NEG_INF;
-
-                        if(dpRoption1 > dpRoption2) {
-                            // Do not add X[w] to seed
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("X");
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                        } else {
-                            // Add X[w] to seed but condition applies (vR must be equal to 0, in other words, 0-length subseq from previous subproblem must have psi-value of 0)
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = (vR == 0) ? sequence[w] + string("") : sequence[w] + string("X");
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = nullptr;
-                        }
-                    } else {
-                        dpRoption1 = dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracOmega;
-
-                        if(this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) {
-                            dpRoption2 = (dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega > NEG_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : NEG_INF;
-                        } else {
-                            dpRoption2 = (dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega < POS_INF) ? (this->tableAR[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] * this->tableBR2[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] + -dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracOmega) : NEG_INF;
-                        }
-
-                        if(dpRoption1 > dpRoption2) {
-                            // Do not add X[w] to seed
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption1;
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = string("") + dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v].fracSeed;
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = &dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + u * this->d + v];
-                        } else {
-                            // Add X[w] to seed
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracOmega = dpRoption2;
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].fracSeed = sequence[w] + ((this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed : dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR].fracSeed);
-                            dpRmax[w * (n + 1) * (this->k + 1) * this->d + s * (this->k + 1) * this->d + u * this->d + v].prevSubproblem = (this->tableBR1[(u - 1) * this->d * this->alphabet.size() + v * this->alphabet.size() + this->alphabet[sequence[w]]] == 1) ? &dpRmax[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR] : &dpRmin[(w + 1) * (n + 1) * (this->k + 1) * this->d + (s - 1) * (this->k + 1) * this->d + (u - 1) * this->d + vR];
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-SubseqHash3::SubseqHash3() : SubseqHash3(24, 11, {{'A', 0}, {'C', 1}, {'G', 2}, {'T', 3}}) {
-    // Parameterized constructor is called from default constructor with default arguments
-}
-
-SubseqHash3::SubseqHash3(int k, int d, map<char, int> alphabet) {
-    this->k = k;
-    this->d = d;
-    this->alphabet = alphabet;
-
-    this->tableAF = new int[k * d * alphabet.size()];
-    this->tableBF1 = new int[k * d * alphabet.size()];
-    this->tableBF2 = new int[k * d * alphabet.size()];
-    this->tableCF = new int[k * alphabet.size()];
-
-    this->tableAR = new int[k * d * alphabet.size()];
-    this->tableBR1 = new int[k * d * alphabet.size()];
-    this->tableBR2 = new int[k * d * alphabet.size()];
-    this->tableCR = new int[k * alphabet.size()];
-
-    this->tableAP = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-    this->tableBP1 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-    this->tableBP2 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-    this->tableBP3 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-    this->tableCP = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-}
-
-SubseqHash3::~SubseqHash3() {
-    delete[] this->tableAF;
-    delete[] this->tableBF1;
-    delete[] this->tableBF2;
-    delete[] this->tableCF;
-
-    delete[] this->tableAR;
-    delete[] this->tableBR1;
-    delete[] this->tableBR2;
-    delete[] this->tableCR;
-
-    delete[] this->tableAP;
-    delete[] this->tableBP1;
-    delete[] this->tableBP2;
-    delete[] this->tableBP3;
-    delete[] this->tableCP;
-}
-
 int SubseqHash3::getK() const {
     return this->k;
 }
@@ -968,13 +893,4 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
             }
         }
     }
-}
-
-// [notice] main function is added only for testing purpose, will remove later
-int main(int argc, char** argv) {
-    SubseqHash3 subseqhash3(5, 7, {{'A', 0}, {'C', 1}, {'G', 2}, {'T', 3}});
-    subseqhash3.generateTables();
-    subseqhash3.loadTables();
-    subseqhash3.solvePivotDP("ACGTACGTACGTACGT", 10);
-    return 0;
 }
