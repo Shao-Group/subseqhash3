@@ -40,19 +40,19 @@ class SubseqHash3 {
     map<char, int> alphabet;
 
     int* tableAF;
-    uint8_t* tableBF1;
-    uint8_t* tableBF2;
+    int* tableBF1;
+    int* tableBF2;
     int* tableCF;
 
     int* tableAR;
-    uint8_t* tableBR1;
-    uint8_t* tableBR2;
+    int* tableBR1;
+    int* tableBR2;
     int* tableCR;
 
     int* tableAP;
-    uint8_t* tableBP1;
-    uint8_t* tableBP2;
-    uint8_t* tableBP3;
+    int* tableBP1;
+    int* tableBP2;
+    int* tableBP3;
     int* tableCP;
 
     int returnPivotTableIndex(int, int, int, int);
@@ -112,24 +112,24 @@ void SubseqHash3::generateTables() {
         }
     }
 
-    vector<uint8_t> pairValues, tripletValues;
+    vector<int> pairValues, tripletValues;
 
-    for(uint8_t i = 0; i < 4; i++) {
+    for(int i = 0; i < 4; i++) {
         pairValues.push_back(i);
     }
 
     if(this->alphabet.size() > 4) {
-        for(uint8_t i = 4; i < this->alphabet.size(); i++) {
+        for(int i = 4; i < this->alphabet.size(); i++) {
             pairValues.push_back(i % 4);
         }
     }
 
-    for(uint8_t i = 0; i < 8; i++) {
+    for(int i = 0; i < 8; i++) {
         tripletValues.push_back(i);
     }
 
     if(this->alphabet.size() > 8) {
-        for(uint8_t i = 8; i < this->alphabet.size(); i++) {
+        for(int i = 8; i < this->alphabet.size(); i++) {
             tripletValues.push_back(i % 8);
         }
     }
@@ -142,16 +142,16 @@ void SubseqHash3::generateTables() {
             shuffle(pairValues.begin(), pairValues.end(), default_random_engine(currentTimeBasedSeed));
 
             for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
-                this->tableBF1[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (uint8_t) (pairValues[sigma] >> 1) % 2;
-                this->tableBF2[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (uint8_t) (pairValues[sigma] >> 0) % 2;
+                this->tableBF1[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (pairValues[sigma] >> 1) % 2;
+                this->tableBF2[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (pairValues[sigma] >> 0) % 2;
             }
 
             currentTimeBasedSeed = chrono::system_clock::now().time_since_epoch().count();
             shuffle(pairValues.begin(), pairValues.end(), default_random_engine(currentTimeBasedSeed));
 
             for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
-                this->tableBR1[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (uint8_t) (pairValues[sigma] >> 1) % 2;
-                this->tableBR2[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (uint8_t) (pairValues[sigma] >> 0) % 2;
+                this->tableBR1[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (pairValues[sigma] >> 1) % 2;
+                this->tableBR2[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma] = (pairValues[sigma] >> 0) % 2;
             }
         }
     }
@@ -425,7 +425,126 @@ void SubseqHash3::generateTables() {
 }
 
 void SubseqHash3::loadTables() {
+    string tablesFilePath = string("..") + filesystem::path::preferred_separator + string("tables") + filesystem::path::preferred_separator + string("tables_k") + to_string(this->k) + string("_d") + to_string(this->d) + string("_sigma") + to_string(this->alphabet.size());
+    ifstream tablesFile;
 
+    tablesFile.open(tablesFilePath);
+
+    if(!tablesFile.is_open()) {
+        exit(EXIT_FAILURE);
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int v = 0; v < this->d; v++) {
+            for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+                tablesFile >> this->tableAF[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma];
+            }
+        }
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int v = 0; v < this->d; v++) {
+            for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+                tablesFile >> this->tableAR[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma];
+            }
+        }
+    }
+
+    for(int i = 0; i < this->k - 1; i++) {
+        for(int j = i + 1; j < this->k; j++) {
+            for(int sigmaI = 0; sigmaI < this->alphabet.size(); sigmaI++) {
+                for(int sigmaJ = 0; sigmaJ < this->alphabet.size(); sigmaJ++) {
+                    tablesFile >> this->tableAP[this->returnPivotTableIndex(i, j, sigmaI, sigmaJ)];
+                }
+            }
+        }
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int v = 0; v < this->d; v++) {
+            for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+                tablesFile >> this->tableBF1[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma];
+            }
+        }
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int v = 0; v < this->d; v++) {
+            for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+                tablesFile >> this->tableBF2[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma];
+            }
+        }
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int v = 0; v < this->d; v++) {
+            for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+                tablesFile >> this->tableBR1[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma];
+            }
+        }
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int v = 0; v < this->d; v++) {
+            for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+                tablesFile >> this->tableBR2[u * this->d * this->alphabet.size() + v * this->alphabet.size() + sigma];
+            }
+        }
+    }
+
+    for(int i = 0; i < this->k - 1; i++) {
+        for(int j = i + 1; j < this->k; j++) {
+            for(int sigmaI = 0; sigmaI < this->alphabet.size(); sigmaI++) {
+                for(int sigmaJ = 0; sigmaJ < this->alphabet.size(); sigmaJ++) {
+                    tablesFile >> this->tableBP1[this->returnPivotTableIndex(i, j, sigmaI, sigmaJ)];
+                }
+            }
+        }
+    }
+
+    for(int i = 0; i < this->k - 1; i++) {
+        for(int j = i + 1; j < this->k; j++) {
+            for(int sigmaI = 0; sigmaI < this->alphabet.size(); sigmaI++) {
+                for(int sigmaJ = 0; sigmaJ < this->alphabet.size(); sigmaJ++) {
+                    tablesFile >> this->tableBP2[this->returnPivotTableIndex(i, j, sigmaI, sigmaJ)];
+                }
+            }
+        }
+    }
+
+    for(int i = 0; i < this->k - 1; i++) {
+        for(int j = i + 1; j < this->k; j++) {
+            for(int sigmaI = 0; sigmaI < this->alphabet.size(); sigmaI++) {
+                for(int sigmaJ = 0; sigmaJ < this->alphabet.size(); sigmaJ++) {
+                    tablesFile >> this->tableBP3[this->returnPivotTableIndex(i, j, sigmaI, sigmaJ)];
+                }
+            }
+        }
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+            tablesFile >> this->tableCF[u * this->alphabet.size() + sigma];
+        }
+    }
+
+    for(int u = 0; u < this->k; u++) {
+        for(int sigma = 0; sigma < this->alphabet.size(); sigma++) {
+            tablesFile >> this->tableCR[u * this->alphabet.size() + sigma];
+        }
+    }
+
+    for(int i = 0; i < this->k - 1; i++) {
+        for(int j = i + 1; j < this->k; j++) {
+            for(int sigmaI = 0; sigmaI < this->alphabet.size(); sigmaI++) {
+                for(int sigmaJ = 0; sigmaJ < this->alphabet.size(); sigmaJ++) {
+                    tablesFile >> this->tableCP[this->returnPivotTableIndex(i, j, sigmaI, sigmaJ)];
+                }
+            }
+        }
+    }
+
+    tablesFile.close();
 }
 
 void SubseqHash3::solveForwardDP(string sequence, int windowLength, BaseDPCell* dpFmin, BaseDPCell* dpFmax) {
@@ -642,19 +761,19 @@ SubseqHash3::SubseqHash3(int k, int d, map<char, int> alphabet) {
     this->alphabet = alphabet;
 
     this->tableAF = new int[k * d * alphabet.size()];
-    this->tableBF1 = new uint8_t[k * d * alphabet.size()];
-    this->tableBF2 = new uint8_t[k * d * alphabet.size()];
+    this->tableBF1 = new int[k * d * alphabet.size()];
+    this->tableBF2 = new int[k * d * alphabet.size()];
     this->tableCF = new int[k * alphabet.size()];
 
     this->tableAR = new int[k * d * alphabet.size()];
-    this->tableBR1 = new uint8_t[k * d * alphabet.size()];
-    this->tableBR2 = new uint8_t[k * d * alphabet.size()];
+    this->tableBR1 = new int[k * d * alphabet.size()];
+    this->tableBR2 = new int[k * d * alphabet.size()];
     this->tableCR = new int[k * alphabet.size()];
 
     this->tableAP = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-    this->tableBP1 = new uint8_t[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-    this->tableBP2 = new uint8_t[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
-    this->tableBP3 = new uint8_t[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+    this->tableBP1 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+    this->tableBP2 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
+    this->tableBP3 = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
     this->tableCP = new int[(k * (k - 1) * alphabet.size() * alphabet.size()) / 2];
 }
 
@@ -854,6 +973,8 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
 // [notice] main function is added only for testing purpose, will remove later
 int main(int argc, char** argv) {
     SubseqHash3 subseqhash3(5, 7, {{'A', 0}, {'C', 1}, {'G', 2}, {'T', 3}});
+    subseqhash3.generateTables();
+    subseqhash3.loadTables();
     subseqhash3.solvePivotDP("ACGTACGTACGTACGT", 10);
     return 0;
 }
