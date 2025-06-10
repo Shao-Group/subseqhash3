@@ -33,8 +33,11 @@ struct PivotDPCell {
 struct PiCell {
     int* psi;
     PivotDPCell* seedData;
+    int windowStartPosition;
     int optimalA;
     int optimalB;
+    int pivotI;
+    int pivotJ;
 };
 
 class SubseqHash3 {
@@ -75,7 +78,7 @@ public:
     int getD() const;
     map<char, int> getAlphabet() const;
 
-    void solvePivotDP(string, int);
+    vector<PiCell> solvePivotDP(string, int);
 };
 
 #endif

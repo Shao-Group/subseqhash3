@@ -732,7 +732,7 @@ map<char, int> SubseqHash3::getAlphabet() const {
     return this->alphabet;
 }
 
-void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
+vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     int N = sequence.length(), n = windowLength;
 
     BaseDPCell *dpFmin, *dpFmax, *dpRmin, *dpRmax;
@@ -868,14 +868,20 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
                         if(a == 0 && b == 1) {
                             pi[w][i][j].psi = &psi[w][a][b][i][j];
                             pi[w][i][j].seedData = &omega[w][a][b][i][j];
-                            pi[w][i][j].optimalA = a;
-                            pi[w][i][j].optimalB = b;
+                            pi[w][i][j].windowStartPosition = w + 1;
+                            pi[w][i][j].optimalA = a + 1;
+                            pi[w][i][j].optimalB = b + 1;
+                            pi[w][i][j].pivotI = i + 1;
+                            pi[w][i][j].pivotJ = j + 1;
                         } else {
                             if(*pi[w][i][j].psi > psi[w][a][b][i][j] || (*pi[w][i][j].psi == psi[w][a][b][i][j] && pi[w][i][j].seedData->omega < omega[w][a][b][i][j].omega)) {
                                 pi[w][i][j].psi = &psi[w][a][b][i][j];
                                 pi[w][i][j].seedData = &omega[w][a][b][i][j];
-                                pi[w][i][j].optimalA = a;
-                                pi[w][i][j].optimalB = b;
+                                pi[w][i][j].windowStartPosition = w + 1;
+                                pi[w][i][j].optimalA = a + 1;
+                                pi[w][i][j].optimalB = b + 1;
+                                pi[w][i][j].pivotI = i + 1;
+                                pi[w][i][j].pivotJ = j + 1;
                             }
                         }
                     }
@@ -884,13 +890,15 @@ void SubseqHash3::solvePivotDP(string sequence, int windowLength) {
         }
     }
 
-    // [notice] Below code segment within this function is added only for testing purpose, will remove later
+    vector<PiCell> seeds;
+
     for(int w = 0; w < N - n + 1; w++) {
         for(int i = 0; i < this->k - 1; i++) {
             for(int j = i + 1; j < this->k; j++) {
-                cout << "window_start_pos (w) = " << w + 1 << ", first_pivot_pos_in_window (a) = " << pi[w][i][j].optimalA + 1 << ", second_pivot_pos_in_window (b) = " << pi[w][i][j].optimalB + 1 << ", first_pivot_pos_in_subseq (i) = " << i + 1 << ", second_pivot_pos_in_subseq (j) = " << j + 1 << endl;
-                cout << "psi = " << *pi[w][i][j].psi << ", omega = " << pi[w][i][j].seedData->omega << ", seed = " << pi[w][i][j].seedData->seed << "\n" << endl;
+                seeds.push_back(pi[w][i][j]);
             }
         }
     }
+    
+    return seeds;
 }
