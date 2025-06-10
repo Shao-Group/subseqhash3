@@ -22,8 +22,6 @@ int main(int argc, char** argv) {
         sequencePairsFile >> sequence2;
 
         vector<PiCell> sequence1Seeds = subseqHash3.solvePivotDP(sequence1, sequence1.length()), sequence2Seeds = subseqHash3.solvePivotDP(sequence2, sequence2.length());
-
-        cout << sequence1Seeds[0].seedData->seed << " " << sequence2Seeds[0].seedData->seed << endl;
     }
 
     sequencePairsFile.close();
