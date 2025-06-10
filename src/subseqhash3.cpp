@@ -750,7 +750,7 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     // [future task] We may want to switch to dynamically allocated arrays with non-trivial access to avoid storing unused array cells
     int psi[N - n + 1][n][n][this->k][this->k];
     PivotDPCell omega[N - n + 1][n][n][this->k][this->k];
-
+    
     // Psi and Omega initialization with d and {NaN, empty_string}, respectively
     for(int w = 0; w < N - n + 1; w++) {
         for(int a = 0; a < n; a++) {
