@@ -38,22 +38,27 @@ int main(int argc, char** argv) {
                 }
             } else {
                 // All pivots vs all pivots seeds comparison
+                bool bHashCollision = false;
+
                 for(int j = 0; j < sequence2Seeds.size(); j++) {
                     if(!sequence1Seeds[i].seedData->seed.empty() && !sequence2Seeds[j].seedData->seed.empty()) {
                         if(sequence1Seeds[i].seedData->seed == sequence2Seeds[j].seedData->seed) {
                             numHashCollisions++;
+                            bHashCollision = true;
                             break;
                         }
                     }
                 }
 
-                break;
+                if(bHashCollision) {
+                    break;
+                }
             }
         }
 
         numTotalSequencePairs++;
     }
-
+    
     sequencePairsFile.close();
 
     cout << "Hash collision probability = " << (float) numHashCollisions / numTotalSequencePairs << endl;
