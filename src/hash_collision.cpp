@@ -19,6 +19,7 @@ int main(int argc, char** argv) {
     }
 
     int numHashCollisions = 0, numTotalSequencePairs = 0;
+    bool bDoSingleComparison = false;
 
     while(sequencePairsFile >> sequence1) {
         sequencePairsFile >> sequence2;
@@ -27,11 +28,26 @@ int main(int argc, char** argv) {
 
         for(int i = 0; i < sequence1Seeds.size(); i++) {
             // [future task] We should look into why we are getting empty seeds with psi and omega values of d and NEG_INF respectively
-            if(!sequence1Seeds[i].seedData->seed.empty() && !sequence2Seeds[i].seedData->seed.empty()) {
-                if(sequence1Seeds[i].seedData->seed == sequence2Seeds[i].seedData->seed) {
-                    numHashCollisions++;
-                    break;
+            if(bDoSingleComparison) {
+                // Specific pivot (i, j) vs same pivot (i, j) seeds comparison (following hash collision experiment in SubseqHash2)
+                if(!sequence1Seeds[i].seedData->seed.empty() && !sequence2Seeds[i].seedData->seed.empty()) {
+                    if(sequence1Seeds[i].seedData->seed == sequence2Seeds[i].seedData->seed) {
+                        numHashCollisions++;
+                        break;
+                    }
                 }
+            } else {
+                // All pivots vs all pivots seeds comparison
+                for(int j = 0; j < sequence2Seeds.size(); j++) {
+                    if(!sequence1Seeds[i].seedData->seed.empty() && !sequence2Seeds[j].seedData->seed.empty()) {
+                        if(sequence1Seeds[i].seedData->seed == sequence2Seeds[j].seedData->seed) {
+                            numHashCollisions++;
+                            break;
+                        }
+                    }
+                }
+
+                break;
             }
         }
 
@@ -40,7 +56,7 @@ int main(int argc, char** argv) {
 
     sequencePairsFile.close();
 
-    cout << "Hash collision probability = " << numHashCollisions / numTotalSequencePairs << endl;
-    
+    cout << "Hash collision probability = " << (float) numHashCollisions / numTotalSequencePairs << endl;
+
     return 0;
 }
