@@ -19,13 +19,25 @@ int main(int argc, char** argv) {
     }
 
     int numHashCollisions = 0, numTotalSequencePairs = 0;
-    bool bDoSingleComparison = false;
+    bool bDoSingleComparison = true, bVerbose = true;
 
     while(sequencePairsFile >> sequence1) {
         sequencePairsFile >> sequence2;
 
         vector<PiCell> sequence1Seeds = subseqHash3.solvePivotDP(sequence1, sequence1.length()), sequence2Seeds = subseqHash3.solvePivotDP(sequence2, sequence2.length());
 
+        if(sequence1Seeds.size() != sequence2Seeds.size()) {
+            exit(EXIT_FAILURE);
+        }
+
+        if(bVerbose) {
+            cout << "Sequence1: " << sequence1 << "\nSequence2: " << sequence2 << "\nwindow_start, first_pivot, second_pivot, first_pivot_win_pos, second_pivot_win_pos, psi, omega, seed" << endl;
+
+            for(int i = 0; i < sequence1Seeds.size(); i++) {
+                cout << sequence1Seeds[i].windowStartPosition << ", " << sequence1Seeds[i].pivotI << ", " << sequence1Seeds[i].pivotJ << ", " << sequence1Seeds[i].optimalA << ", " << sequence1Seeds[i].optimalB << ", " << *sequence1Seeds[i].psi << ", " << sequence1Seeds[i].seedData->omega << ", " << sequence1Seeds[i].seedData->seed << "\n" << sequence2Seeds[i].windowStartPosition << ", " << sequence2Seeds[i].pivotI << ", " << sequence2Seeds[i].pivotJ << ", " << sequence2Seeds[i].optimalA << ", " << sequence2Seeds[i].optimalB << ", " << *sequence2Seeds[i].psi << ", " << sequence2Seeds[i].seedData->omega << ", " << sequence2Seeds[i].seedData->seed << "\n-" << endl;
+            }
+        }
+        
         for(int i = 0; i < sequence1Seeds.size(); i++) {
             // [future task] We should look into why we are getting empty seeds with psi and omega values of d and NEG_INF respectively
             if(bDoSingleComparison) {
