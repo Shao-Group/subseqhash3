@@ -31,13 +31,14 @@ struct PivotDPCell {
 };
 
 struct PiCell {
-    int* psi;
-    PivotDPCell* seedData;
     int windowStartPosition;
     int optimalA;
     int optimalB;
     int pivotI;
     int pivotJ;
+    int psi;
+    int omega;
+    string seed;
 };
 
 class SubseqHash3 {

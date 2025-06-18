@@ -866,22 +866,24 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
                 for(int a = 0; a < n - 1; a++) {
                     for(int b = a + 1; b < n; b++) {
                         if(a == 0 && b == 1) {
-                            pi[w][i][j].psi = &psi[w][a][b][i][j];
-                            pi[w][i][j].seedData = &omega[w][a][b][i][j];
                             pi[w][i][j].windowStartPosition = w + 1;
                             pi[w][i][j].optimalA = a + 1;
                             pi[w][i][j].optimalB = b + 1;
                             pi[w][i][j].pivotI = i + 1;
                             pi[w][i][j].pivotJ = j + 1;
+                            pi[w][i][j].psi = psi[w][a][b][i][j];
+                            pi[w][i][j].omega = omega[w][a][b][i][j].omega;
+                            pi[w][i][j].seed = omega[w][a][b][i][j].seed;
                         } else {
-                            if(*pi[w][i][j].psi > psi[w][a][b][i][j] || (*pi[w][i][j].psi == psi[w][a][b][i][j] && pi[w][i][j].seedData->omega < omega[w][a][b][i][j].omega)) {
-                                pi[w][i][j].psi = &psi[w][a][b][i][j];
-                                pi[w][i][j].seedData = &omega[w][a][b][i][j];
+                            if(pi[w][i][j].psi > psi[w][a][b][i][j] || (pi[w][i][j].psi == psi[w][a][b][i][j] && pi[w][i][j].omega < omega[w][a][b][i][j].omega)) {
                                 pi[w][i][j].windowStartPosition = w + 1;
                                 pi[w][i][j].optimalA = a + 1;
                                 pi[w][i][j].optimalB = b + 1;
                                 pi[w][i][j].pivotI = i + 1;
                                 pi[w][i][j].pivotJ = j + 1;
+                                pi[w][i][j].psi = psi[w][a][b][i][j];
+                                pi[w][i][j].omega = omega[w][a][b][i][j].omega;
+                                pi[w][i][j].seed = omega[w][a][b][i][j].seed;
                             }
                         }
                     }

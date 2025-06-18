@@ -34,18 +34,18 @@ int main(int argc, char** argv) {
             cout << "Sequence1: " << sequence1 << "\nSequence2: " << sequence2 << "\n\nwindow_start (w), first_pivot (i), second_pivot (j), first_pivot_win_pos (a), second_pivot_win_pos (b), psi, omega, seed\n" << endl;
 
             for(int i = 0; i < sequence1Seeds.size(); i++) {
-                cout << sequence1Seeds[i].windowStartPosition << ", " << sequence1Seeds[i].pivotI << ", " << sequence1Seeds[i].pivotJ << ", " << sequence1Seeds[i].optimalA << ", " << sequence1Seeds[i].optimalB << ", " << *sequence1Seeds[i].psi << ", " << sequence1Seeds[i].seedData->omega << ", " << sequence1Seeds[i].seedData->seed << "\n" << sequence2Seeds[i].windowStartPosition << ", " << sequence2Seeds[i].pivotI << ", " << sequence2Seeds[i].pivotJ << ", " << sequence2Seeds[i].optimalA << ", " << sequence2Seeds[i].optimalB << ", " << *sequence2Seeds[i].psi << ", " << sequence2Seeds[i].seedData->omega << ", " << sequence2Seeds[i].seedData->seed << "\n" << endl;
+                cout << sequence1Seeds[i].windowStartPosition << ", " << sequence1Seeds[i].pivotI << ", " << sequence1Seeds[i].pivotJ << ", " << sequence1Seeds[i].optimalA << ", " << sequence1Seeds[i].optimalB << ", " << sequence1Seeds[i].psi << ", " << sequence1Seeds[i].omega << ", " << sequence1Seeds[i].seed << "\n" << sequence2Seeds[i].windowStartPosition << ", " << sequence2Seeds[i].pivotI << ", " << sequence2Seeds[i].pivotJ << ", " << sequence2Seeds[i].optimalA << ", " << sequence2Seeds[i].optimalB << ", " << sequence2Seeds[i].psi << ", " << sequence2Seeds[i].omega << ", " << sequence2Seeds[i].seed << "\n" << endl;
             }
 
             cout << "-\n" << endl;
         }
-        
+
         for(int i = 0; i < sequence1Seeds.size(); i++) {
             // [future task] We should look into why we are getting empty seeds with psi and omega values of d and NEG_INF respectively
             if(bDoSingleComparison) {
                 // Specific pivot (i, j) vs same pivot (i, j) seeds comparison (following hash collision experiment in SubseqHash2)
-                if(!sequence1Seeds[i].seedData->seed.empty() && !sequence2Seeds[i].seedData->seed.empty()) {
-                    if(sequence1Seeds[i].seedData->seed == sequence2Seeds[i].seedData->seed) {
+                if(!sequence1Seeds[i].seed.empty() && !sequence2Seeds[i].seed.empty()) {
+                    if(sequence1Seeds[i].seed == sequence2Seeds[i].seed) {
                         numHashCollisions++;
                         break;
                     }
@@ -53,10 +53,10 @@ int main(int argc, char** argv) {
             } else {
                 // All pivots vs all pivots seeds comparison
                 bool bHashCollision = false;
-
+                
                 for(int j = 0; j < sequence2Seeds.size(); j++) {
-                    if(!sequence1Seeds[i].seedData->seed.empty() && !sequence2Seeds[j].seedData->seed.empty()) {
-                        if(sequence1Seeds[i].seedData->seed == sequence2Seeds[j].seedData->seed) {
+                    if(!sequence1Seeds[i].seed.empty() && !sequence2Seeds[j].seed.empty()) {
+                        if(sequence1Seeds[i].seed == sequence2Seeds[j].seed) {
                             numHashCollisions++;
                             bHashCollision = true;
                             break;
