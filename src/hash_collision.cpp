@@ -31,11 +31,13 @@ int main(int argc, char** argv) {
         }
 
         if(bVerbose) {
-            cout << "Sequence1: " << sequence1 << "\nSequence2: " << sequence2 << "\nwindow_start, first_pivot, second_pivot, first_pivot_win_pos, second_pivot_win_pos, psi, omega, seed" << endl;
+            cout << "Sequence1: " << sequence1 << "\nSequence2: " << sequence2 << "\n\nwindow_start (w), first_pivot (i), second_pivot (j), first_pivot_win_pos (a), second_pivot_win_pos (b), psi, omega, seed\n" << endl;
 
             for(int i = 0; i < sequence1Seeds.size(); i++) {
-                cout << sequence1Seeds[i].windowStartPosition << ", " << sequence1Seeds[i].pivotI << ", " << sequence1Seeds[i].pivotJ << ", " << sequence1Seeds[i].optimalA << ", " << sequence1Seeds[i].optimalB << ", " << *sequence1Seeds[i].psi << ", " << sequence1Seeds[i].seedData->omega << ", " << sequence1Seeds[i].seedData->seed << "\n" << sequence2Seeds[i].windowStartPosition << ", " << sequence2Seeds[i].pivotI << ", " << sequence2Seeds[i].pivotJ << ", " << sequence2Seeds[i].optimalA << ", " << sequence2Seeds[i].optimalB << ", " << *sequence2Seeds[i].psi << ", " << sequence2Seeds[i].seedData->omega << ", " << sequence2Seeds[i].seedData->seed << "\n-" << endl;
+                cout << sequence1Seeds[i].windowStartPosition << ", " << sequence1Seeds[i].pivotI << ", " << sequence1Seeds[i].pivotJ << ", " << sequence1Seeds[i].optimalA << ", " << sequence1Seeds[i].optimalB << ", " << *sequence1Seeds[i].psi << ", " << sequence1Seeds[i].seedData->omega << ", " << sequence1Seeds[i].seedData->seed << "\n" << sequence2Seeds[i].windowStartPosition << ", " << sequence2Seeds[i].pivotI << ", " << sequence2Seeds[i].pivotJ << ", " << sequence2Seeds[i].optimalA << ", " << sequence2Seeds[i].optimalB << ", " << *sequence2Seeds[i].psi << ", " << sequence2Seeds[i].seedData->omega << ", " << sequence2Seeds[i].seedData->seed << "\n" << endl;
             }
+
+            cout << "-\n" << endl;
         }
         
         for(int i = 0; i < sequence1Seeds.size(); i++) {
