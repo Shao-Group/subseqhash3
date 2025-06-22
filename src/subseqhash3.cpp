@@ -13,6 +13,48 @@ int SubseqHash3::returnPivotTableIndex(int i, int j, int sigmaI, int sigmaJ) {
     return pivotTableIndex;
 }
 
+int SubseqHash3::returnPsiOmegaTableIndex(int n, int w, int a, int b, int i, int j) {
+    int psiOmegaTableIndex = 0;
+
+    // This function assumes that w is 0-based or 0-indexed, that is, w starts from 0
+    psiOmegaTableIndex += w * n * (n - 1) * this->k * (this->k - 1) / 4;
+
+    // This function assumes that a is 1-based or 1-indexed, that is, a starts from 1
+    for(int aIndex = 1; aIndex < a; aIndex++) {
+        psiOmegaTableIndex += (n - aIndex) * this->k * (this->k - 1) / 2;
+    }
+
+    // This function assumes that b is also 1-based or 1-indexed, that is, b also starts from 1
+    psiOmegaTableIndex += (b - (a + 1)) * this->k * (this->k - 1) / 2;
+
+    // This function assumes that i is also 1-based or 1-indexed, that is, i also starts from 1
+    for(int iIndex = 1; iIndex < i; iIndex++) {
+        psiOmegaTableIndex += this->k - iIndex;
+    }
+
+    // This function assumes that j is also 1-based or 1-indexed, that is, j also starts from 1
+    psiOmegaTableIndex += j - (i + 1);
+
+    return psiOmegaTableIndex;
+}
+
+int SubseqHash3::returnPiTableIndex(int w, int i, int j) {
+    int piTableIndex = 0;
+
+    // This function assumes that w is 0-based or 0-indexed, that is, w starts from 0
+    piTableIndex += w * this->k * (this->k - 1) / 2;
+
+    // This function assumes that i is 1-based or 1-indexed, that is, i starts from 1
+    for(int iIndex = 1; iIndex < i; iIndex++) {
+        piTableIndex += this->k - iIndex;
+    }
+
+    // This function assumes that j is also 1-based or 1-indexed, that is, j also starts from 1
+    piTableIndex += j - (i + 1);
+
+    return piTableIndex;
+}
+
 void SubseqHash3::solveForwardDP(string sequence, int windowLength, BaseDPCell* dpFmin, BaseDPCell* dpFmax) {
     int N = sequence.length(), n = windowLength;
 
@@ -746,21 +788,20 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     solveForwardDP(sequence, windowLength, dpFmin, dpFmax);
     solveReverseDP(sequence, windowLength, dpRmin, dpRmax);
 
-    // Psi and Omega have a dimension of [N - n + 1][n][n][k][k]
-    // [future task] We may want to switch to dynamically allocated arrays with non-trivial access to avoid storing unused array cells
-    int psi[N - n + 1][n][n][this->k][this->k];
-    PivotDPCell omega[N - n + 1][n][n][this->k][this->k];
-    
+    // Psi and Omega have a reduced dimension of [N - n + 1][n][n][k][k]
+    int psi[(N - n + 1) * n * (n - 1) * this->k * (this->k - 1) / 4];
+    PivotDPCell omega[(N - n + 1) * n * (n - 1) * this->k * (this->k - 1) / 4];
+
     // Psi and Omega initialization with d and {NaN, empty_string}, respectively
     for(int w = 0; w < N - n + 1; w++) {
-        for(int a = 0; a < n; a++) {
-            for(int b = 0; b < n; b++) {
-                for(int i = 0; i < this->k; i++) {
-                    for(int j = 0; j < this->k; j++) {
-                        psi[w][a][b][i][j] = this->d;
+        for(int a = 1; a < n; a++) {
+            for(int b = a + 1; b <= n; b++) {
+                for(int i = 1; i < this->k; i++) {
+                    for(int j = i + 1; j <= this->k; j++) {
+                        psi[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)] = this->d;
 
-                        omega[w][a][b][i][j].omega = NEG_INF;
-                        omega[w][a][b][i][j].seed = string("");
+                        omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].omega = NEG_INF;
+                        omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].seed = string("");
                     }
                 }
             }
@@ -780,13 +821,13 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
                                 if(w + b < N) {
                                     for(int v3 = 0; v3 < this->d; v3++) {
                                         if(dpRmin[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega < POS_INF && dpFmin[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracOmega < POS_INF && dpRmin[(w + b) * (n + 1) * (this->k + 1) * this->d + (n - b) * (this->k + 1) * this->d + (this->k - j) * this->d + v3].fracOmega < POS_INF) {
-                                            psi[w][a - 1][b - 1][i - 1][j - 1] = min(psi[w][a - 1][b - 1][i - 1][j - 1], (this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + v1 + v2 + v3) % this->d);
+                                            psi[this->returnPsiOmegaTableIndex(n, w, a, b, i ,j)] = min(psi[this->returnPsiOmegaTableIndex(n, w, a, b, i ,j)], (this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + v1 + v2 + v3) % this->d);
                                         }
                                     }
                                 } else {
                                     if(dpRmin[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega < POS_INF && dpFmin[(w + a) * (n + 1) * (this->k + 1) * this->d + (b - a - 1) * (this->k + 1) * this->d + (j - i - 1) * this->d + v2].fracOmega < POS_INF && j == this->k) {
                                         // v3 = 0 only when subseq length is also 0, or in other words, only a psi value of 0 is acceptable for a 0-length subseq
-                                        psi[w][a - 1][b - 1][i - 1][j - 1] = min(psi[w][a - 1][b - 1][i - 1][j - 1], (this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + v1 + v2) % this->d);
+                                        psi[this->returnPsiOmegaTableIndex(n, w, a, b, i ,j)] = min(psi[this->returnPsiOmegaTableIndex(n, w, a, b, i ,j)], (this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + v1 + v2) % this->d);
                                     }
                                 }
                             }
@@ -809,8 +850,8 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
                                 int v3, reverseFracOmega1, forwardFracOmega2, reverseFracOmega3;
                                 string reverseFracSeed1, forwardFracSeed2, reverseFracSeed3;
 
-                                v3 = (psi[w][a - 1][b - 1][i - 1][j - 1] - this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] - v1 - v2 + 3 * this->d) % this->d;
-
+                                v3 = (psi[this->returnPsiOmegaTableIndex(n, w, a, b, i ,j)] - this->tableCP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] - v1 - v2 + 3 * this->d) % this->d;
+                                
                                 if(this->tableBP1[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] == 1) {
                                     reverseFracOmega1 = dpRmax[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracOmega;
                                     reverseFracSeed1 = dpRmax[w * (n + 1) * (this->k + 1) * this->d + (a - 1) * (this->k + 1) * this->d + (i - 1) * this->d + v1].fracSeed;
@@ -837,9 +878,9 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
                                 }
 
                                 if(reverseFracOmega1 > -POS_INF && forwardFracOmega2 > -POS_INF && reverseFracOmega3 > -POS_INF) {
-                                    if(omega[w][a - 1][b - 1][i - 1][j - 1].omega < this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverseFracOmega1 + forwardFracOmega2 + reverseFracOmega3) {
-                                        omega[w][a - 1][b - 1][i - 1][j - 1].omega = this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverseFracOmega1 + forwardFracOmega2 + reverseFracOmega3;
-                                        omega[w][a - 1][b - 1][i - 1][j - 1].seed = reverseFracSeed1 + sequence[w + a - 1] + forwardFracSeed2 + sequence[w + b - 1] + reverseFracSeed3;
+                                    if(omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].omega < this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverseFracOmega1 + forwardFracOmega2 + reverseFracOmega3) {
+                                        omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].omega = this->tableAP[this->returnPivotTableIndex(i - 1, j - 1, this->alphabet[sequence[w + a - 1]], this->alphabet[sequence[w + b - 1]])] + reverseFracOmega1 + forwardFracOmega2 + reverseFracOmega3;
+                                        omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].seed = reverseFracSeed1 + sequence[w + a - 1] + forwardFracSeed2 + sequence[w + b - 1] + reverseFracSeed3;
                                     }
                                 }
                             }
@@ -855,35 +896,34 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     delete[] dpRmin;
     delete[] dpRmax;
 
-    // Pi has a dimension of [N - n + 1][k][k]
-    // [future task] We may want to switch to a dynamically allocated array with non-trivial access to avoid storing unused array cells
-    PiCell pi[N - n + 1][this->k][this->k];
+    // Pi has a reduced dimension of [N - n + 1][k][k]
+    PiCell pi[(N - n + 1) * this->k * (this->k - 1) / 2];
 
     for(int w = 0; w < N - n + 1; w++) {
-        for(int i = 0; i < this->k - 1; i++) {
-            for(int j = i + 1; j < this->k; j++) {
+        for(int i = 1; i < this->k; i++) {
+            for(int j = i + 1; j <= this->k; j++) {
                 // Finding optimal seed from all possible combinations of pivot positions a and b
-                for(int a = 0; a < n - 1; a++) {
-                    for(int b = a + 1; b < n; b++) {
-                        if(a == 0 && b == 1) {
-                            pi[w][i][j].windowStartPosition = w + 1;
-                            pi[w][i][j].optimalA = a + 1;
-                            pi[w][i][j].optimalB = b + 1;
-                            pi[w][i][j].pivotI = i + 1;
-                            pi[w][i][j].pivotJ = j + 1;
-                            pi[w][i][j].psi = psi[w][a][b][i][j];
-                            pi[w][i][j].omega = omega[w][a][b][i][j].omega;
-                            pi[w][i][j].seed = omega[w][a][b][i][j].seed;
+                for(int a = 1; a < n; a++) {
+                    for(int b = a + 1; b <= n; b++) {
+                        if(a == 1 && b == 2) {
+                            pi[this->returnPiTableIndex(w, i, j)].windowStartPosition = w + 1;
+                            pi[this->returnPiTableIndex(w, i, j)].optimalA = a;
+                            pi[this->returnPiTableIndex(w, i, j)].optimalB = b;
+                            pi[this->returnPiTableIndex(w, i, j)].pivotI = i;
+                            pi[this->returnPiTableIndex(w, i, j)].pivotJ = j;
+                            pi[this->returnPiTableIndex(w, i, j)].psi = psi[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)];
+                            pi[this->returnPiTableIndex(w, i, j)].omega = omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].omega;
+                            pi[this->returnPiTableIndex(w, i, j)].seed = omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].seed;
                         } else {
-                            if(pi[w][i][j].psi > psi[w][a][b][i][j] || (pi[w][i][j].psi == psi[w][a][b][i][j] && pi[w][i][j].omega < omega[w][a][b][i][j].omega)) {
-                                pi[w][i][j].windowStartPosition = w + 1;
-                                pi[w][i][j].optimalA = a + 1;
-                                pi[w][i][j].optimalB = b + 1;
-                                pi[w][i][j].pivotI = i + 1;
-                                pi[w][i][j].pivotJ = j + 1;
-                                pi[w][i][j].psi = psi[w][a][b][i][j];
-                                pi[w][i][j].omega = omega[w][a][b][i][j].omega;
-                                pi[w][i][j].seed = omega[w][a][b][i][j].seed;
+                            if(pi[this->returnPiTableIndex(w, i, j)].psi > psi[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)] || (pi[this->returnPiTableIndex(w, i, j)].psi == psi[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)] && pi[this->returnPiTableIndex(w, i, j)].omega < omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].omega)) {
+                                pi[this->returnPiTableIndex(w, i, j)].windowStartPosition = w + 1;
+                                pi[this->returnPiTableIndex(w, i, j)].optimalA = a;
+                                pi[this->returnPiTableIndex(w, i, j)].optimalB = b;
+                                pi[this->returnPiTableIndex(w, i, j)].pivotI = i;
+                                pi[this->returnPiTableIndex(w, i, j)].pivotJ = j;
+                                pi[this->returnPiTableIndex(w, i, j)].psi = psi[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)];
+                                pi[this->returnPiTableIndex(w, i, j)].omega = omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].omega;
+                                pi[this->returnPiTableIndex(w, i, j)].seed = omega[this->returnPsiOmegaTableIndex(n, w, a, b, i, j)].seed;
                             }
                         }
                     }
@@ -895,9 +935,9 @@ vector<PiCell> SubseqHash3::solvePivotDP(string sequence, int windowLength) {
     vector<PiCell> seeds;
 
     for(int w = 0; w < N - n + 1; w++) {
-        for(int i = 0; i < this->k - 1; i++) {
-            for(int j = i + 1; j < this->k; j++) {
-                seeds.push_back(pi[w][i][j]);
+        for(int i = 1; i < this->k; i++) {
+            for(int j = i + 1; j <= this->k; j++) {
+                seeds.push_back(pi[this->returnPiTableIndex(w, i, j)]);
             }
         }
     }

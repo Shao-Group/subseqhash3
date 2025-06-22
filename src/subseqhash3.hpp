@@ -67,6 +67,9 @@ class SubseqHash3 {
     void solveForwardDP(string, int, BaseDPCell*, BaseDPCell*);
     void solveReverseDP(string, int, BaseDPCell*, BaseDPCell*);
 
+    int returnPsiOmegaTableIndex(int, int, int, int, int, int);
+    int returnPiTableIndex(int, int, int);
+    
 public:
     SubseqHash3();
     SubseqHash3(int, int, map<char, int>);
