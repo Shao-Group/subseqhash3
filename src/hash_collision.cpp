@@ -1,5 +1,9 @@
 #include "subseqhash3.hpp"
 
+bool comparePiCellByOmega(const PiCell& piCell1, const PiCell& piCell2) {
+    return piCell1.omega > piCell2.omega;
+}
+
 int main(int argc, char** argv) {
     int k = stoi(argv[1]), d = stoi(argv[2]);
 
@@ -19,7 +23,7 @@ int main(int argc, char** argv) {
     }
 
     int numHashCollisions = 0, numTotalSequencePairs = 0;
-    bool bDoSingleComparison = true, bVerbose = true;
+    bool bDoSingleComparison = true, bVerbose = true, bDoHigherOmegaComparison = true;
 
     while(sequencePairsFile >> sequence1) {
         sequencePairsFile >> sequence2;
@@ -40,32 +44,69 @@ int main(int argc, char** argv) {
             cout << "-\n" << endl;
         }
 
-        for(int i = 0; i < sequence1Seeds.size(); i++) {
-            // [future task] We should look into why we are getting empty seeds with psi and omega values of d and NEG_INF respectively
-            if(bDoSingleComparison) {
-                // Specific pivot (i, j) vs same pivot (i, j) seeds comparison (following hash collision experiment in SubseqHash2)
-                if(!sequence1Seeds[i].seed.empty() && !sequence2Seeds[i].seed.empty()) {
+        if(bDoHigherOmegaComparison) {
+            // Omega score-based top k seeds vs omega score-based top k seeds all vs all comparison
+            sort(sequence1Seeds.begin(), sequence1Seeds.end(), comparePiCellByOmega);
+            sort(sequence2Seeds.begin(), sequence2Seeds.end(), comparePiCellByOmega);
+
+            bool bHashCollision = false;
+
+            for(int i = 0; i < subseqHash3.getK(); i++) {
+                if(sequence1Seeds[i].seed.empty()) {
+                    exit(EXIT_FAILURE);
+                }
+
+                for(int j = 0; j < subseqHash3.getK(); j++) {
+                    if(sequence2Seeds[j].seed.empty()) {
+                        exit(EXIT_FAILURE);
+                    }
+
+                    if(sequence1Seeds[i].seed == sequence2Seeds[j].seed) {
+                        numHashCollisions++;
+                        bHashCollision = true;
+                        break;
+                    }
+                }
+
+                if(bHashCollision) {
+                    break;
+                }
+            }
+        } else {
+            bool bHashCollision = false;
+
+            for(int i = 0; i < sequence1Seeds.size(); i++) {
+                if(bDoSingleComparison) {
+                    // Specific pivot (i, j) vs same pivot (i, j) seeds comparison (following hash collision experiment in SubseqHash2)
+                    if(sequence1Seeds[i].seed.empty() || sequence2Seeds[i].seed.empty()) {
+                        exit(EXIT_FAILURE);
+                    }
+
                     if(sequence1Seeds[i].seed == sequence2Seeds[i].seed) {
                         numHashCollisions++;
                         break;
                     }
-                }
-            } else {
-                // All pivots vs all pivots seeds comparison
-                bool bHashCollision = false;
-                
-                for(int j = 0; j < sequence2Seeds.size(); j++) {
-                    if(!sequence1Seeds[i].seed.empty() && !sequence2Seeds[j].seed.empty()) {
+                } else {
+                    // All pivots vs all pivots seeds comparison
+                    if(sequence1Seeds[i].seed.empty()) {
+                        exit(EXIT_FAILURE);
+                    }
+
+                    for(int j = 0; j < sequence2Seeds.size(); j++) {
+                        if(sequence2Seeds[j].seed.empty()) {
+                            exit(EXIT_FAILURE);
+                        }
+
                         if(sequence1Seeds[i].seed == sequence2Seeds[j].seed) {
                             numHashCollisions++;
                             bHashCollision = true;
                             break;
                         }
                     }
-                }
 
-                if(bHashCollision) {
-                    break;
+                    if(bHashCollision) {
+                        break;
+                    }
                 }
             }
         }
