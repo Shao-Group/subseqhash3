@@ -22,8 +22,8 @@ int main(int argc, char** argv) {
         exit(EXIT_FAILURE);
     }
 
-    int numHashCollisions = 0, numTotalSequencePairs = 0;
-    bool bDoSingleComparison = true, bVerbose = true, bDoHigherOmegaComparison = true;
+    bool bDoSingleComparison = true, bVerbose = false, bDoHigherOmegaComparison = true;
+    int numHashCollisions = 0, numTotalSequencePairs = 0, numTopPicks = 1;
 
     while(sequencePairsFile >> sequence1) {
         sequencePairsFile >> sequence2;
@@ -51,12 +51,12 @@ int main(int argc, char** argv) {
 
             bool bHashCollision = false;
 
-            for(int i = 0; i < subseqHash3.getK(); i++) {
+            for(int i = 0; i < numTopPicks; i++) {
                 if(sequence1Seeds[i].seed.empty()) {
                     exit(EXIT_FAILURE);
                 }
 
-                for(int j = 0; j < subseqHash3.getK(); j++) {
+                for(int j = 0; j < numTopPicks; j++) {
                     if(sequence2Seeds[j].seed.empty()) {
                         exit(EXIT_FAILURE);
                     }
