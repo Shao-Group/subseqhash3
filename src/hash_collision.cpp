@@ -22,9 +22,9 @@ int main(int argc, char** argv) {
         exit(EXIT_FAILURE);
     }
 
-    bool bDoSingleComparison = true, bVerbose = false, bDoHigherOmegaComparison = true;
-    int numHashCollisions = 0, numTotalSequencePairs = 0, numTopPicks = 1;
-
+    bool bDoSingleComparison = true, bVerbose = false, bDoHigherOmegaComparison = false, bDoRandomComparison = true;
+    int numHashCollisions = 0, numTotalSequencePairs = 0, numSubsamplePicks = subseqHash3.getK();
+    
     while(sequencePairsFile >> sequence1) {
         sequencePairsFile >> sequence2;
 
@@ -44,19 +44,46 @@ int main(int argc, char** argv) {
             cout << "-\n" << endl;
         }
 
-        if(bDoHigherOmegaComparison) {
+        if(bDoRandomComparison) {
+            // Randomly picked k pivot positions-based single seed vs single seed comparison
+            if(sequence1Seeds.size() != (int) subseqHash3.getK() * (subseqHash3.getK() - 1) / 2) {
+                exit(EXIT_FAILURE);
+            }
+
+            vector<int> seedIndices, subsampledIndices;
+
+            for(int i = 0; i < sequence1Seeds.size(); i++) {
+                seedIndices.push_back(i);
+            }
+
+            random_device seedSource;
+            mt19937 randomNumberEngine(seedSource());
+
+            sample(seedIndices.begin(), seedIndices.end(), back_inserter(subsampledIndices), numSubsamplePicks, randomNumberEngine);
+
+            for(int subsampledIndex: subsampledIndices) {
+                if(sequence1Seeds[subsampledIndex].seed.empty() || sequence2Seeds[subsampledIndex].seed.empty()) {
+                    exit(EXIT_FAILURE);
+                }
+
+                if(sequence1Seeds[subsampledIndex].seed == sequence2Seeds[subsampledIndex].seed) {
+                    numHashCollisions++;
+                    break;
+                }
+            }
+        } else if(bDoHigherOmegaComparison) {
             // Omega score-based top k seeds vs omega score-based top k seeds all vs all comparison
             sort(sequence1Seeds.begin(), sequence1Seeds.end(), comparePiCellByOmega);
             sort(sequence2Seeds.begin(), sequence2Seeds.end(), comparePiCellByOmega);
 
             bool bHashCollision = false;
 
-            for(int i = 0; i < numTopPicks; i++) {
+            for(int i = 0; i < numSubsamplePicks; i++) {
                 if(sequence1Seeds[i].seed.empty()) {
                     exit(EXIT_FAILURE);
                 }
 
-                for(int j = 0; j < numTopPicks; j++) {
+                for(int j = 0; j < numSubsamplePicks; j++) {
                     if(sequence2Seeds[j].seed.empty()) {
                         exit(EXIT_FAILURE);
                     }
