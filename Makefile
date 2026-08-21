@@ -16,10 +16,12 @@ EDIT_PAIR_SIMULATOR := $(BUILD_DIR)/simulate_edit_pairs
 EDIT_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_edit_collisions
 SUBSEQHASH_ADJACENT_TEST := $(BUILD_DIR)/test_subseqhash_adjacent
 ADJACENT_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_adjacent_collisions
+SUBSEQHASH_EDITS_I16_TEST := $(BUILD_DIR)/test_subseqhash_edits_i16
+SUBSEQHASH_EDITS_I16_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash_edits_i16
 SUBSEQHASH_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash
 LIB_OBJECT := $(BUILD_DIR)/subsequence_scores.o
 
-.PHONY: all test benchmark benchmark-subseqhash benchmark-edit-collisions benchmark-adjacent-collisions witnesses collision-estimator simulate-edit-pairs sanitize clean
+.PHONY: all test benchmark benchmark-subseqhash benchmark-subseqhash-edits-i16 benchmark-edit-collisions benchmark-adjacent-collisions witnesses collision-estimator simulate-edit-pairs sanitize clean
 
 all: $(TARGET) \
 	$(BENCHMARK) \
@@ -31,6 +33,8 @@ all: $(TARGET) \
 	$(EDIT_COLLISION_BENCHMARK) \
 	$(SUBSEQHASH_ADJACENT_TEST) \
 	$(ADJACENT_COLLISION_BENCHMARK) \
+	$(SUBSEQHASH_EDITS_I16_TEST) \
+	$(SUBSEQHASH_EDITS_I16_BENCHMARK) \
 	$(SUBSEQHASH_BENCHMARK)
 
 $(BUILD_DIR):
@@ -45,11 +49,12 @@ $(BUILD_DIR)/test_subsequence_scores.o: $(SRC_DIR)/test_subsequence_scores.c $(S
 $(TARGET): $(LIB_OBJECT) $(BUILD_DIR)/test_subsequence_scores.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(TARGET) $(SUBSEQHASH_TEST) $(SUBSEQHASH_EDITS_TEST) $(SUBSEQHASH_ADJACENT_TEST)
+test: $(TARGET) $(SUBSEQHASH_TEST) $(SUBSEQHASH_EDITS_TEST) $(SUBSEQHASH_ADJACENT_TEST) $(SUBSEQHASH_EDITS_I16_TEST)
 	./$(TARGET)
 	./$(SUBSEQHASH_TEST)
 	./$(SUBSEQHASH_EDITS_TEST)
 	./$(SUBSEQHASH_ADJACENT_TEST)
+	./$(SUBSEQHASH_EDITS_I16_TEST)
 
 $(BUILD_DIR)/benchmark_subsequence_scores.o: $(SRC_DIR)/benchmark_subsequence_scores.c $(SRC_DIR)/subsequence_scores.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -97,6 +102,24 @@ $(BUILD_DIR)/test_subseqhash_edits.o: $(SRC_DIR)/test_subseqhash_edits.c $(SRC_D
 
 $(SUBSEQHASH_EDITS_TEST): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/test_subseqhash_edits.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
+$(BUILD_DIR)/subseqhash_edits_i16.o: $(SRC_DIR)/subseqhash_edits_i16.c $(SRC_DIR)/subseqhash_edits_i16.h $(SRC_DIR)/subseqhash_edits.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/test_subseqhash_edits_i16.o: $(SRC_DIR)/test_subseqhash_edits_i16.c $(SRC_DIR)/subseqhash_edits_i16.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(SUBSEQHASH_EDITS_I16_TEST): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_edits_i16.o $(BUILD_DIR)/test_subseqhash_edits_i16.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
+$(BUILD_DIR)/benchmark_subseqhash_edits_i16.o: $(SRC_DIR)/benchmark_subseqhash_edits_i16.c $(SRC_DIR)/subseqhash_edits_i16.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(SUBSEQHASH_EDITS_I16_BENCHMARK): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_edits_i16.o $(BUILD_DIR)/benchmark_subseqhash_edits_i16.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
+benchmark-subseqhash-edits-i16: $(SUBSEQHASH_EDITS_I16_BENCHMARK)
+	./$(SUBSEQHASH_EDITS_I16_BENCHMARK)
 
 $(BUILD_DIR)/subseqhash_adjacent.o: $(SRC_DIR)/subseqhash_adjacent.c $(SRC_DIR)/subseqhash_adjacent.h $(SRC_DIR)/subseqhash_edits.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -156,6 +179,8 @@ clean:
 		$(EDIT_COLLISION_BENCHMARK) \
 		$(SUBSEQHASH_ADJACENT_TEST) \
 		$(ADJACENT_COLLISION_BENCHMARK) \
+		$(SUBSEQHASH_EDITS_I16_TEST) \
+		$(SUBSEQHASH_EDITS_I16_BENCHMARK) \
 		$(SUBSEQHASH_BENCHMARK) \
 		$(BUILD_DIR)/test_subsequence_scores_sanitized
 	rmdir $(BUILD_DIR) 2>/dev/null || true
