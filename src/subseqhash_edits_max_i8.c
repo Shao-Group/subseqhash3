@@ -130,7 +130,7 @@ int subseqhash_compute_all_edit_splits_max_i8(
     size_t d,ec,band,parent_states,l,h,e,q,r,a,result_index;
     int16_t *scores=NULL,*old,*new_scores;
     uint8_t *parent=NULL; int status=-1;
-    if (!t || !results || !t->d || t->k<n || n>258 ||
+    if (!t || !results || !t->d || t->k<n || n>SUBSEQHASH_MAX_I8_MAX_LENGTH ||
         total_edits>n || (n&&!s)) return -1;
     d=t->d; ec=total_edits+1;
     if (!ec || ec>SIZE_MAX/sizeof(*results) || ec>SIZE_MAX/ec ||
