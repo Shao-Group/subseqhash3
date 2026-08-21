@@ -14,6 +14,7 @@ SUBSEQHASH_TEST := $(BUILD_DIR)/test_subseqhash
 SUBSEQHASH_EDITS_TEST := $(BUILD_DIR)/test_subseqhash_edits
 EDIT_PAIR_SIMULATOR := $(BUILD_DIR)/simulate_edit_pairs
 EDIT_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_edit_collisions
+SUBSEQHASH_ADJACENT_TEST := $(BUILD_DIR)/test_subseqhash_adjacent
 SUBSEQHASH_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash
 LIB_OBJECT := $(BUILD_DIR)/subsequence_scores.o
 
@@ -27,6 +28,7 @@ all: $(TARGET) \
 	$(SUBSEQHASH_EDITS_TEST) \
 	$(EDIT_PAIR_SIMULATOR) \
 	$(EDIT_COLLISION_BENCHMARK) \
+	$(SUBSEQHASH_ADJACENT_TEST) \
 	$(SUBSEQHASH_BENCHMARK)
 
 $(BUILD_DIR):
@@ -41,10 +43,11 @@ $(BUILD_DIR)/test_subsequence_scores.o: $(SRC_DIR)/test_subsequence_scores.c $(S
 $(TARGET): $(LIB_OBJECT) $(BUILD_DIR)/test_subsequence_scores.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(TARGET) $(SUBSEQHASH_TEST) $(SUBSEQHASH_EDITS_TEST)
+test: $(TARGET) $(SUBSEQHASH_TEST) $(SUBSEQHASH_EDITS_TEST) $(SUBSEQHASH_ADJACENT_TEST)
 	./$(TARGET)
 	./$(SUBSEQHASH_TEST)
 	./$(SUBSEQHASH_EDITS_TEST)
+	./$(SUBSEQHASH_ADJACENT_TEST)
 
 $(BUILD_DIR)/benchmark_subsequence_scores.o: $(SRC_DIR)/benchmark_subsequence_scores.c $(SRC_DIR)/subsequence_scores.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -93,6 +96,15 @@ $(BUILD_DIR)/test_subseqhash_edits.o: $(SRC_DIR)/test_subseqhash_edits.c $(SRC_D
 $(SUBSEQHASH_EDITS_TEST): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/test_subseqhash_edits.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
 
+$(BUILD_DIR)/subseqhash_adjacent.o: $(SRC_DIR)/subseqhash_adjacent.c $(SRC_DIR)/subseqhash_adjacent.h $(SRC_DIR)/subseqhash_edits.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/test_subseqhash_adjacent.o: $(SRC_DIR)/test_subseqhash_adjacent.c $(SRC_DIR)/subseqhash_adjacent.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(SUBSEQHASH_ADJACENT_TEST): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_adjacent.o $(BUILD_DIR)/test_subseqhash_adjacent.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
 $(BUILD_DIR)/simulate_edit_pairs.o: $(SRC_DIR)/simulate_edit_pairs.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -132,6 +144,7 @@ clean:
 		$(SUBSEQHASH_EDITS_TEST) \
 		$(EDIT_PAIR_SIMULATOR) \
 		$(EDIT_COLLISION_BENCHMARK) \
+		$(SUBSEQHASH_ADJACENT_TEST) \
 		$(SUBSEQHASH_BENCHMARK) \
 		$(BUILD_DIR)/test_subsequence_scores_sanitized
 	rmdir $(BUILD_DIR) 2>/dev/null || true

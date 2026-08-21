@@ -63,3 +63,8 @@ Show me the estimated probability for the above 12 approaches (1 + 11) on each f
 Using your code to simulate pairs for N = 1000, n = 30 and for all combinations of Es + Ed <= 5; write your
 results to files in folder data/data-1k-30-all, with each file for a specific Es and Ed
 
+Current subseqhash-edit scores individual letters at the k positions.
+Extend the scoring to consider adjacent letters
+this includes the extension of A, B, and C tables.
+Its corresponding DP should be adjusted accordingly too.
+write down the tables, definition of psi and omega, DP subproblems, and recurrences into a latex document, doc/main.tex
