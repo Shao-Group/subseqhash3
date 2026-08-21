@@ -91,6 +91,7 @@ int subseqhash_i16_tables_make_double(const SubseqHashI16Tables *s,
     return 0;
 }
 
+#if !HAVE_AVX512_I16_DP || !defined(__AVX512VL__)
 static void save_parent(uint8_t *decision,size_t r,unsigned a,
                         unsigned min_type,unsigned max_type) {
     unsigned value=decision[r];
@@ -99,7 +100,9 @@ static void save_parent(uint8_t *decision,size_t r,unsigned a,
         ((max_type+(unsigned)a*2u)<<4);
     decision[r]=(uint8_t)value;
 }
+#endif
 
+#if !HAVE_AVX512_I16_DP || !defined(__AVX512VL__)
 static void update_scalar(const int32_t *src_mn,const int32_t *src_mx,
                           int32_t *dst_mn,int32_t *dst_mx,
                           const int16_t *A,const int8_t *B1,
@@ -125,54 +128,112 @@ static void update_scalar(const int32_t *src_mn,const int32_t *src_mx,
             save_parent(decision,r,symbol,min_type,max_type);
     }
 }
+#endif
 
 #if HAVE_AVX512_I16_DP
+static void update_parent_vector(uint8_t *decision,size_t offset,
+                                 __mmask16 active,__mmask16 positive,
+                                 __mmask16 minmask,__mmask16 maxmask,
+                                 unsigned symbol) {
+#if defined(__AVX512VL__)
+    const __m128i low_keep=_mm_set1_epi8((char)0xf0);
+    const __m128i high_keep=_mm_set1_epi8(0x0f);
+    const __m128i min_negative=_mm_set1_epi8(
+        (char)(2u+symbol*2u));
+    const __m128i min_positive=_mm_set1_epi8(
+        (char)(1u+symbol*2u));
+    const __m128i max_negative=min_positive;
+    const __m128i max_positive=min_negative;
+    __m128i value=_mm_maskz_loadu_epi8(active,decision+offset);
+    __m128i code=_mm_mask_blend_epi8(
+        positive,min_negative,min_positive);
+    __m128i updated=_mm_or_si128(_mm_and_si128(value,low_keep),code);
+    value=_mm_mask_mov_epi8(value,minmask,updated);
+    code=_mm_mask_blend_epi8(positive,max_negative,max_positive);
+    code=_mm_slli_epi16(code,4);
+    updated=_mm_or_si128(_mm_and_si128(value,high_keep),code);
+    value=_mm_mask_mov_epi8(value,maxmask,updated);
+    _mm_mask_storeu_epi8(decision+offset,active,value);
+#else
+    while (minmask || maxmask) {
+        unsigned lane=(unsigned)__builtin_ctz(
+            (unsigned)(minmask|maxmask));
+        unsigned min_type=(minmask&(1u<<lane))?
+            ((positive&(1u<<lane))?1u:2u):0u;
+        unsigned max_type=(maxmask&(1u<<lane))?
+            ((positive&(1u<<lane))?2u:1u):0u;
+        save_parent(decision,offset+lane,symbol,min_type,max_type);
+        minmask=(__mmask16)(minmask&~(1u<<lane));
+        maxmask=(__mmask16)(maxmask&~(1u<<lane));
+    }
+    (void)active;
+#endif
+}
+
+static void update_avx512_block(
+    const int32_t *src_mn,const int32_t *src_mx,
+    int32_t *dst_mn,int32_t *dst_mx,
+    const int16_t *A,const int8_t *B1,const int8_t *B2,
+    uint8_t *decision,size_t q,size_t r,size_t count,unsigned symbol) {
+    const __mmask16 active=count==16?(__mmask16)0xffffu:
+        (__mmask16)((1u<<(unsigned)count)-1u);
+    const __m512i infinity=_mm512_set1_epi32(INT32_MAX);
+    __m512i smn=_mm512_maskz_loadu_epi32(active,src_mn+q);
+    __m512i smx=_mm512_maskz_loadu_epi32(active,src_mx+q);
+    __m512i dmn=_mm512_maskz_loadu_epi32(active,dst_mn+r);
+    __m512i dmx=_mm512_maskz_loadu_epi32(active,dst_mx+r);
+    __m256i a16;
+    __m128i b1_8,b2_8;
+#if defined(__AVX512VL__)
+    a16=_mm256_maskz_loadu_epi16(active,A+r);
+    b1_8=_mm_maskz_loadu_epi8(active,B1+r);
+    b2_8=_mm_maskz_loadu_epi8(active,B2+r);
+#else
+    if (count<16) {
+        update_scalar(src_mn,src_mx,dst_mn,dst_mx,A,B1,B2,decision,
+                      q,r,count,symbol);
+        return;
+    }
+    a16=_mm256_loadu_si256((const __m256i *)(A+r));
+    b1_8=_mm_loadu_si128((const __m128i *)(B1+r));
+    b2_8=_mm_loadu_si128((const __m128i *)(B2+r));
+#endif
+    {
+        __m512i av=_mm512_cvtepi16_epi32(a16);
+        __m512i b1v=_mm512_cvtepi8_epi32(b1_8);
+        __m512i b2v=_mm512_cvtepi8_epi32(b2_8);
+        __m512i add=_mm512_mullo_epi32(av,b2v);
+        __mmask16 reachable=active&_mm512_cmpneq_epi32_mask(smn,infinity);
+        __mmask16 positive=active&_mm512_cmpgt_epi32_mask(
+            b1v,_mm512_setzero_si512());
+        __m512i lo=_mm512_add_epi32(
+            _mm512_mask_blend_epi32(positive,
+                _mm512_sub_epi32(_mm512_setzero_si512(),smx),smn),add);
+        __m512i hi=_mm512_add_epi32(
+            _mm512_mask_blend_epi32(positive,
+                _mm512_sub_epi32(_mm512_setzero_si512(),smn),smx),add);
+        __mmask16 minmask=reachable&_mm512_cmplt_epi32_mask(lo,dmn);
+        __mmask16 maxmask=reachable&_mm512_cmpgt_epi32_mask(hi,dmx);
+        _mm512_mask_storeu_epi32(dst_mn+r,minmask,lo);
+        _mm512_mask_storeu_epi32(dst_mx+r,maxmask,hi);
+        if (minmask || maxmask)
+            update_parent_vector(decision,r,active,positive,
+                                 minmask,maxmask,symbol);
+    }
+}
+
 static void update_avx512(const int32_t *src_mn,const int32_t *src_mx,
                           int32_t *dst_mn,int32_t *dst_mx,
                           const int16_t *A,const int8_t *B1,
                           const int8_t *B2,uint8_t *decision,
                           size_t q0,size_t r0,size_t count,unsigned symbol) {
-    const __m512i infinity=_mm512_set1_epi32(INT32_MAX);
     size_t i=0;
-    for (;i+16<=count;i+=16) {
-        __m512i smn=_mm512_loadu_si512((const void *)(src_mn+q0+i));
-        __m512i smx=_mm512_loadu_si512((const void *)(src_mx+q0+i));
-        __m512i dmn=_mm512_loadu_si512((const void *)(dst_mn+r0+i));
-        __m512i dmx=_mm512_loadu_si512((const void *)(dst_mx+r0+i));
-        __m256i a16=_mm256_loadu_si256((const __m256i *)(A+r0+i));
-        __m128i b1_8=_mm_loadu_si128((const __m128i *)(B1+r0+i));
-        __m128i b2_8=_mm_loadu_si128((const __m128i *)(B2+r0+i));
-        __m512i av=_mm512_cvtepi16_epi32(a16);
-        __m512i b1v=_mm512_cvtepi8_epi32(b1_8);
-        __m512i b2v=_mm512_cvtepi8_epi32(b2_8);
-        __m512i add=_mm512_mullo_epi32(av,b2v);
-        __mmask16 reachable=_mm512_cmpneq_epi32_mask(smn,infinity);
-        __mmask16 positive=_mm512_cmpgt_epi32_mask(
-            b1v,_mm512_setzero_si512());
-        __m512i lo=_mm512_add_epi32(
-            _mm512_mask_blend_epi32(positive,_mm512_sub_epi32(
-                _mm512_setzero_si512(),smx),smn),add);
-        __m512i hi=_mm512_add_epi32(
-            _mm512_mask_blend_epi32(positive,_mm512_sub_epi32(
-                _mm512_setzero_si512(),smn),smx),add);
-        __mmask16 minmask=reachable&_mm512_cmplt_epi32_mask(lo,dmn);
-        __mmask16 maxmask=reachable&_mm512_cmpgt_epi32_mask(hi,dmx);
-        _mm512_mask_storeu_epi32(dst_mn+r0+i,minmask,lo);
-        _mm512_mask_storeu_epi32(dst_mx+r0+i,maxmask,hi);
-        while (minmask || maxmask) {
-            unsigned lane=(unsigned)__builtin_ctz(
-                (unsigned)(minmask|maxmask));
-            unsigned min_type=(minmask&(1u<<lane))?
-                ((positive&(1u<<lane))?1u:2u):0u;
-            unsigned max_type=(maxmask&(1u<<lane))?
-                ((positive&(1u<<lane))?2u:1u):0u;
-            save_parent(decision,r0+i+lane,symbol,min_type,max_type);
-            minmask=(__mmask16)(minmask&~(1u<<lane));
-            maxmask=(__mmask16)(maxmask&~(1u<<lane));
-        }
-    }
-    update_scalar(src_mn,src_mx,dst_mn,dst_mx,A,B1,B2,decision,
-                  q0+i,r0+i,count-i,symbol);
+    for (;i+16<=count;i+=16)
+        update_avx512_block(src_mn,src_mx,dst_mn,dst_mx,A,B1,B2,
+                            decision,q0+i,r0+i,16,symbol);
+    if (i<count)
+        update_avx512_block(src_mn,src_mx,dst_mn,dst_mx,A,B1,B2,
+                            decision,q0+i,r0+i,count-i,symbol);
 }
 #endif
 
@@ -298,5 +359,11 @@ done:
 }
 
 const char *subseqhash_edits_i16_backend(void) {
-    return HAVE_AVX512_I16_DP?"AVX-512 (16 x int32 states)":"scalar int32";
+#if HAVE_AVX512_I16_DP && defined(__AVX512VL__)
+    return "AVX-512VL (masked tails + vector parents)";
+#elif HAVE_AVX512_I16_DP
+    return "AVX-512 (scalar tails/parents)";
+#else
+    return "scalar int32";
+#endif
 }
