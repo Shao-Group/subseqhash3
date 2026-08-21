@@ -19,8 +19,11 @@ static int encode_dna(const char *text, size_t length, uint8_t *encoded) {
     }
     return 0;
 }
-int estimate_subseqhash_collisions(const char *filename, size_t k, size_t D,
-                                   HashCollisionStats *stats) {
+typedef int (*ComputeFunction)(const uint8_t *,size_t,const SubseqHashTables *,
+                               uint8_t *,size_t *,size_t *,double *);
+
+static int estimate_with(const char *filename,size_t k,size_t D,
+                         HashCollisionStats *stats,ComputeFunction compute) {
     FILE *input=NULL; size_t cap1=0,cap2=0; uint8_t *w1=NULL,*w2=NULL;
     char *line1=NULL,*line2=NULL; SubseqHashTables tables; int status=-1;
     if (!filename || !stats || !D || k>SIZE_MAX/4) return -1;
@@ -43,8 +46,8 @@ int estimate_subseqhash_collisions(const char *filename, size_t k, size_t D,
         if (encode_dna(line1,n1,s1) || encode_dna(line2,n2,s2)) {
             fprintf(stderr,"invalid DNA character in pair %zu\n",stats->pairs); free(s2); free(s1); break;
         }
-        if (subseqhash_compute_optimized(s1,n1,&tables,w1,NULL,&psi,&omega) ||
-            subseqhash_compute_optimized(s2,n2,&tables,w2,NULL,&psi,&omega)) {
+        if (compute(s1,n1,&tables,w1,NULL,&psi,&omega) ||
+            compute(s2,n2,&tables,w2,NULL,&psi,&omega)) {
             fprintf(stderr,"witness computation failed for pair %zu\n",stats->pairs); free(s2); free(s1); break;
         }
         ++stats->valid_pairs; if (!memcmp(w1,w2,k)) ++stats->collisions; free(s2); free(s1);
@@ -54,6 +57,17 @@ cleanup:
     if (stats->valid_pairs) stats->valid_frequency=(double)stats->collisions/stats->valid_pairs;
     free(line2); free(line1); free(w2); free(w1);
     subseqhash_tables_destroy(&tables); if (input) fclose(input); return status;
+}
+
+int estimate_subseqhash_collisions(const char *filename,size_t k,size_t D,
+                                   HashCollisionStats *stats) {
+    return estimate_with(filename,k,D,stats,subseqhash_compute_optimized);
+}
+
+int estimate_subseqhash_collisions_original(const char *filename,size_t k,
+                                            size_t D,
+                                            HashCollisionStats *stats) {
+    return estimate_with(filename,k,D,stats,subseqhash_compute);
 }
 
 int estimate_hash_collisions(const char *filename, size_t k, size_t D,

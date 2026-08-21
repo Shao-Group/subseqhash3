@@ -9,6 +9,9 @@ typedef struct {
 } HashCollisionStats;
 int estimate_subseqhash_collisions(const char *filename, size_t k, size_t D,
                                    HashCollisionStats *stats);
+int estimate_subseqhash_collisions_original(const char *filename, size_t k,
+                                            size_t D,
+                                            HashCollisionStats *stats);
 
 /* Backward-compatible name for the SubseqHash estimator. */
 int estimate_hash_collisions(const char *filename, size_t k, size_t D,

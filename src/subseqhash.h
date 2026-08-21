@@ -24,6 +24,17 @@ int subseqhash_compute_optimized(const uint8_t *s, size_t n,
                                  const SubseqHashTables *tables,
                                  uint8_t *seed, size_t *positions,
                                  size_t *psi, double *omega);
+/*
+ * Leftmost-state variant: DP[j,residue] stores the earliest ending position.
+ * It minimizes psi exactly, chooses a witness ending as early as possible,
+ * and then evaluates that witness using the complete ABC recurrence.
+ * Unlike the two functions above, it does not maximize |omega| among all
+ * witnesses with the minimum psi.
+ */
+int subseqhash_compute_leftmost(const uint8_t *s, size_t n,
+                                const SubseqHashTables *tables,
+                                uint8_t *seed, size_t *positions,
+                                size_t *psi, double *omega);
 int subseqhash_score(const uint8_t *seed, const SubseqHashTables *tables,
                      size_t *psi, double *omega);
 #endif
