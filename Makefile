@@ -15,10 +15,11 @@ SUBSEQHASH_EDITS_TEST := $(BUILD_DIR)/test_subseqhash_edits
 EDIT_PAIR_SIMULATOR := $(BUILD_DIR)/simulate_edit_pairs
 EDIT_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_edit_collisions
 SUBSEQHASH_ADJACENT_TEST := $(BUILD_DIR)/test_subseqhash_adjacent
+ADJACENT_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_adjacent_collisions
 SUBSEQHASH_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash
 LIB_OBJECT := $(BUILD_DIR)/subsequence_scores.o
 
-.PHONY: all test benchmark benchmark-subseqhash benchmark-edit-collisions witnesses collision-estimator simulate-edit-pairs sanitize clean
+.PHONY: all test benchmark benchmark-subseqhash benchmark-edit-collisions benchmark-adjacent-collisions witnesses collision-estimator simulate-edit-pairs sanitize clean
 
 all: $(TARGET) \
 	$(BENCHMARK) \
@@ -29,6 +30,7 @@ all: $(TARGET) \
 	$(EDIT_PAIR_SIMULATOR) \
 	$(EDIT_COLLISION_BENCHMARK) \
 	$(SUBSEQHASH_ADJACENT_TEST) \
+	$(ADJACENT_COLLISION_BENCHMARK) \
 	$(SUBSEQHASH_BENCHMARK)
 
 $(BUILD_DIR):
@@ -121,6 +123,14 @@ $(EDIT_COLLISION_BENCHMARK): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_e
 
 benchmark-edit-collisions: $(EDIT_COLLISION_BENCHMARK)
 
+$(BUILD_DIR)/benchmark_adjacent_collisions.o: $(SRC_DIR)/benchmark_adjacent_collisions.c $(SRC_DIR)/subseqhash_adjacent.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(ADJACENT_COLLISION_BENCHMARK): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_adjacent.o $(BUILD_DIR)/benchmark_adjacent_collisions.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
+benchmark-adjacent-collisions: $(ADJACENT_COLLISION_BENCHMARK)
+
 $(BUILD_DIR)/benchmark_subseqhash.o: $(SRC_DIR)/benchmark_subseqhash.c $(SRC_DIR)/subseqhash.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -145,6 +155,7 @@ clean:
 		$(EDIT_PAIR_SIMULATOR) \
 		$(EDIT_COLLISION_BENCHMARK) \
 		$(SUBSEQHASH_ADJACENT_TEST) \
+		$(ADJACENT_COLLISION_BENCHMARK) \
 		$(SUBSEQHASH_BENCHMARK) \
 		$(BUILD_DIR)/test_subsequence_scores_sanitized
 	rmdir $(BUILD_DIR) 2>/dev/null || true
