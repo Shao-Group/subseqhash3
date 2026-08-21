@@ -29,15 +29,21 @@ static size_t subtract_mod(size_t x,size_t y,size_t modulus) {
 int subseqhash_i16_tables_init(SubseqHashI16Tables *t,size_t k,size_t d,
                                uint64_t seed) {
     static const int8_t b1[4]={1,1,-1,-1},b2[4]={1,-1,1,-1};
-    size_t cells,i,r,a;
+    size_t cells,mask_cells,i,r,a;
     if (!t || !d || k>(size_t)(INT32_MAX/32767) ||
         k>SIZE_MAX/d || k*d>SIZE_MAX/4 ||
         k*d*4>SIZE_MAX/sizeof(*t->A)) return -1;
-    memset(t,0,sizeof(*t)); t->k=k; t->d=d; cells=k*d*4;
+    memset(t,0,sizeof(*t)); t->k=k; t->d=d; t->blocks=(d+15)/16;
+    cells=k*d*4;
+    if (k>SIZE_MAX/4 || k*4>SIZE_MAX/t->blocks) return -1;
+    mask_cells=k*4*t->blocks;
     t->A=malloc((cells?cells:1)*sizeof(*t->A));
     t->B1=malloc(cells?cells:1); t->B2=malloc(cells?cells:1);
+    t->signed_A=malloc((cells?cells:1)*sizeof(*t->signed_A));
+    t->B1_masks=calloc(mask_cells?mask_cells:1,sizeof(*t->B1_masks));
     t->C=malloc((k?k*4:1)*sizeof(*t->C));
-    if (!t->A || !t->B1 || !t->B2 || !t->C) {
+    if (!t->A || !t->B1 || !t->B2 || !t->signed_A ||
+        !t->B1_masks || !t->C) {
         subseqhash_i16_tables_destroy(t); return -1;
     }
     for (i=0;i<cells;++i)
@@ -53,6 +59,10 @@ int subseqhash_i16_tables_init(SubseqHashI16Tables *t,size_t k,size_t d,
             size_t x=table_index(t,i,r,a);
             t->B1[x]=b1[permutation[a]];
             t->B2[x]=b2[permutation[a]];
+            t->signed_A[x]=(int16_t)(t->A[x]*t->B2[x]);
+            if (t->B1[x]>0)
+                t->B1_masks[(i*4+a)*t->blocks+r/16]|=
+                    (uint16_t)(1u<<(r%16));
         }
     }
     for (i=0;i<k;++i) for (a=0;a<4;++a) {
@@ -68,7 +78,8 @@ int subseqhash_i16_tables_init(SubseqHashI16Tables *t,size_t k,size_t d,
 
 void subseqhash_i16_tables_destroy(SubseqHashI16Tables *t) {
     if (!t) return;
-    free(t->C); free(t->B2); free(t->B1); free(t->A);
+    free(t->C); free(t->B1_masks); free(t->signed_A);
+    free(t->B2); free(t->B1); free(t->A);
     memset(t,0,sizeof(*t));
 }
 
@@ -170,6 +181,58 @@ static void update_parent_vector(uint8_t *decision,size_t offset,
 #endif
 }
 
+#if defined(__AVX512VL__)
+static void update_avx512_aligned(
+    const int32_t *src_mn,const int32_t *src_mx,
+    int32_t *dst_mn,int32_t *dst_mx,const int16_t *signed_A,
+    const uint16_t *B1_masks,uint8_t *decision,size_t d,size_t shift,
+    unsigned symbol) {
+    const __m512i infinity=_mm512_set1_epi32(INT32_MAX);
+    const __m512i zero=_mm512_setzero_si512();
+    const size_t blocks=d/16;
+    size_t block;
+    for (block=0;block<blocks;++block) {
+        const size_t r=block*16;
+        const size_t q=r>=shift?r-shift:r+d-shift;
+        __m512i smn,smx;
+        __m512i dmn=_mm512_loadu_si512((const void *)(dst_mn+r));
+        __m512i dmx=_mm512_loadu_si512((const void *)(dst_mx+r));
+        __m256i add16=_mm256_loadu_si256(
+            (const __m256i *)(signed_A+r));
+        __m512i add=_mm512_cvtepi16_epi32(add16);
+        __mmask16 positive=(__mmask16)B1_masks[block];
+        if (q+16<=d) {
+            smn=_mm512_loadu_si512((const void *)(src_mn+q));
+            smx=_mm512_loadu_si512((const void *)(src_mx+q));
+        } else {
+            const unsigned tail=(unsigned)(d-q);
+            const __mmask16 low=(__mmask16)((1u<<tail)-1u);
+            const __mmask16 high=(__mmask16)~low;
+            smn=_mm512_maskz_loadu_epi32(low,src_mn+q);
+            smx=_mm512_maskz_loadu_epi32(low,src_mx+q);
+            smn=_mm512_mask_expandloadu_epi32(smn,high,src_mn);
+            smx=_mm512_mask_expandloadu_epi32(smx,high,src_mx);
+        }
+        {
+            __mmask16 reachable=_mm512_cmpneq_epi32_mask(smn,infinity);
+            __m512i lo=_mm512_add_epi32(
+                _mm512_mask_blend_epi32(
+                    positive,_mm512_sub_epi32(zero,smx),smn),add);
+            __m512i hi=_mm512_add_epi32(
+                _mm512_mask_blend_epi32(
+                    positive,_mm512_sub_epi32(zero,smn),smx),add);
+            __mmask16 minmask=reachable&_mm512_cmplt_epi32_mask(lo,dmn);
+            __mmask16 maxmask=reachable&_mm512_cmpgt_epi32_mask(hi,dmx);
+            _mm512_mask_storeu_epi32(dst_mn+r,minmask,lo);
+            _mm512_mask_storeu_epi32(dst_mx+r,maxmask,hi);
+            if (minmask || maxmask)
+                update_parent_vector(decision,r,(__mmask16)0xffffu,
+                                     positive,minmask,maxmask,symbol);
+        }
+    }
+}
+#endif
+
 static void update_avx512_block(
     const int32_t *src_mn,const int32_t *src_mx,
     int32_t *dst_mn,int32_t *dst_mx,
@@ -240,8 +303,18 @@ static void update_avx512(const int32_t *src_mn,const int32_t *src_mx,
 static void update_shifted(const int32_t *src_mn,const int32_t *src_mx,
                            int32_t *dst_mn,int32_t *dst_mx,
                            const int16_t *A,const int8_t *B1,
-                           const int8_t *B2,uint8_t *decision,size_t d,
-                           size_t shift,unsigned symbol) {
+                           const int8_t *B2,const int16_t *signed_A,
+                           const uint16_t *B1_masks,uint8_t *decision,
+                           size_t d,size_t shift,unsigned symbol) {
+    (void)signed_A;
+    (void)B1_masks;
+#if HAVE_AVX512_I16_DP && defined(__AVX512VL__)
+    if (!(d&15u)) {
+        update_avx512_aligned(src_mn,src_mx,dst_mn,dst_mx,signed_A,
+                              B1_masks,decision,d,shift,symbol);
+        return;
+    }
+#endif
 #if HAVE_AVX512_I16_DP
 #define UPDATE_RANGE update_avx512
 #else
@@ -310,6 +383,8 @@ int subseqhash_compute_all_edit_splits_i16(
                     new_mn+I16_STATE(h,e+changed,0),
                     new_mx+I16_STATE(h,e+changed,0),
                     t->A+table_base,t->B1+table_base,t->B2+table_base,
+                    t->signed_A+table_base,
+                    t->B1_masks+(row*4+a)*t->blocks,
                     parent+I16_PARENT(l,h,e+changed,0),d,
                     t->C[4*row+a],(unsigned)a);
             }
@@ -360,7 +435,7 @@ done:
 
 const char *subseqhash_edits_i16_backend(void) {
 #if HAVE_AVX512_I16_DP && defined(__AVX512VL__)
-    return "AVX-512VL (masked tails + vector parents)";
+    return "AVX-512VL (packed signs + aligned blocks)";
 #elif HAVE_AVX512_I16_DP
     return "AVX-512 (scalar tails/parents)";
 #else

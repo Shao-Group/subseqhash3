@@ -7,6 +7,9 @@ typedef struct {
     size_t k, d;
     int16_t *A;
     int8_t *B1, *B2;
+    int16_t *signed_A;
+    uint16_t *B1_masks;
+    size_t blocks;
     size_t *C;
 } SubseqHashI16Tables;
 
