@@ -41,97 +41,125 @@ static int encode(const char *text,size_t n,uint8_t *s) {
     return 0;
 }
 
-static int benchmark_file(const char *filename,size_t n,size_t k,size_t edits,
-                          const SubseqHashTables *plain_tables,
-                          const SubseqHashTables *edit_tables) {
+static int benchmark_file(const char *filename,size_t n,size_t k,size_t d,
+                          size_t edits,size_t repeats,uint64_t seed_base) {
     FILE *input=fopen(filename,"r");
-    char *line1=NULL,*line2=NULL; size_t cap1=0,cap2=0,pairs=0,split;
-    size_t plain_collisions=0,edit_collisions=0,all_collisions=0;
-    size_t split_collisions[32]={0};
-    double plain_time=0,edit_time=0;
+    char *line1=NULL,*line2=NULL; size_t cap1=0,cap2=0,split,repeat;
+    double pairs_sum=0,plain_time_sum=0,plain_rate_sum=0;
+    double plain_collisions_sum=0,edit_time_sum=0,edit_rate_sum=0;
+    double edit_collisions_sum=0,all_collisions_sum=0;
+    double split_collisions_sum[32]={0};
     uint8_t *s1=NULL,*s2=NULL,*seed1=NULL,*seed2=NULL;
     int status=-1;
     if (!input) { perror(filename); return -1; }
     s1=malloc(n?n:1); s2=malloc(n?n:1);
     seed1=malloc(k?k:1); seed2=malloc(k?k:1);
     if (!s1 || !s2 || !seed1 || !seed2) goto done;
-    for (;;) {
-        ssize_t read1=getline(&line1,&cap1,input),read2;
-        size_t length1,length2,psi; double omega,t0;
-        SubseqHashEditResult left[32],right[32];
-        int any=0,all=1;
-        if (read1<0) { status=ferror(input)?-1:0; break; }
-        read2=getline(&line2,&cap2,input);
-        if (read2<0) { fprintf(stderr,"%s has an odd line count\n",filename); break; }
-        length1=(size_t)read1; length2=(size_t)read2;
-        trim(line1,&length1); trim(line2,&length2);
-        if (length1!=n || length2!=n || encode(line1,n,s1) || encode(line2,n,s2)) {
-            fprintf(stderr,"invalid pair %zu in %s\n",pairs+1,filename); break;
-        }
-
-        t0=seconds();
-        if (subseqhash_compute_optimized(s1,n,plain_tables,seed1,NULL,&psi,&omega) ||
-            subseqhash_compute_optimized(s2,n,plain_tables,seed2,NULL,&psi,&omega))
-            break;
-        plain_time+=seconds()-t0;
-        if (!memcmp(seed1,seed2,k)) ++plain_collisions;
-
-        t0=seconds();
-        if (subseqhash_compute_all_edit_splits(s1,n,edits,edit_tables,left) ||
-            subseqhash_compute_all_edit_splits(s2,n,edits,edit_tables,right)) {
+    for (repeat=0;repeat<repeats;++repeat) {
+        SubseqHashTables edit_tables={0},plain_tables;
+        size_t pairs=0,plain_collisions=0,edit_collisions=0,all_collisions=0;
+        size_t split_collisions[32]={0};
+        double plain_time=0,edit_time=0;
+        int run_status=-1;
+        if (subseqhash_tables_init(
+                &edit_tables,n,d,
+                seed_base+repeat*UINT64_C(0x9e3779b97f4a7c15)))
+            goto done;
+        plain_tables=edit_tables; plain_tables.k=k;
+        rewind(input); clearerr(input);
+        for (;;) {
+            ssize_t read1=getline(&line1,&cap1,input),read2;
+            size_t length1,length2,psi; double omega,t0;
+            SubseqHashEditResult left[32],right[32];
+            int any=0,all=1;
+            if (read1<0) { run_status=ferror(input)?-1:0; break; }
+            read2=getline(&line2,&cap2,input);
+            if (read2<0) {
+                fprintf(stderr,"%s has an odd line count\n",filename); break;
+            }
+            length1=(size_t)read1; length2=(size_t)read2;
+            trim(line1,&length1); trim(line2,&length2);
+            if (length1!=n || length2!=n || encode(line1,n,s1) ||
+                encode(line2,n,s2)) {
+                fprintf(stderr,"invalid pair %zu in %s\n",pairs+1,filename);
+                break;
+            }
+            t0=seconds();
+            if (subseqhash_compute_optimized(
+                    s1,n,&plain_tables,seed1,NULL,&psi,&omega) ||
+                subseqhash_compute_optimized(
+                    s2,n,&plain_tables,seed2,NULL,&psi,&omega))
+                break;
+            plain_time+=seconds()-t0;
+            plain_collisions+=(size_t)!memcmp(seed1,seed2,k);
+            t0=seconds();
+            if (subseqhash_compute_all_edit_splits(
+                    s1,n,edits,&edit_tables,left) ||
+                subseqhash_compute_all_edit_splits(
+                    s2,n,edits,&edit_tables,right)) {
+                subseqhash_edit_results_destroy(left,edits+1);
+                break;
+            }
+            for (split=0;split<=edits;++split) {
+                const int equal=left[split].length==right[split].length &&
+                    !memcmp(left[split].seed,right[split].seed,
+                            left[split].length);
+                any|=equal; all&=equal;
+                split_collisions[split]+=(size_t)equal;
+            }
+            subseqhash_edit_results_destroy(right,edits+1);
             subseqhash_edit_results_destroy(left,edits+1);
-            break;
+            edit_time+=seconds()-t0;
+            edit_collisions+=(size_t)any;
+            all_collisions+=(size_t)all;
+            ++pairs;
         }
-        for (split=0;split<=edits;++split) {
-            const int equal=left[split].length==right[split].length &&
-                !memcmp(left[split].seed,right[split].seed,left[split].length);
-            any|=equal; all&=equal;
-            split_collisions[split]+=(size_t)equal;
-        }
-        subseqhash_edit_results_destroy(right,edits+1);
-        subseqhash_edit_results_destroy(left,edits+1);
-        edit_time+=seconds()-t0;
-        edit_collisions+=(size_t)any;
-        all_collisions+=(size_t)all;
-        ++pairs;
-    }
-done:
-    if (!status)
-    {
-        printf("%s,%zu,%.6f,%.3f,%zu,%.6f,%.3f,%zu,%zu",
-               filename,pairs,plain_time,
-               plain_time?(double)pairs/plain_time:0.0,plain_collisions,
-               edit_time,edit_time?(double)pairs/edit_time:0.0,
-               edit_collisions,all_collisions);
+        subseqhash_tables_destroy(&edit_tables);
+        if (run_status) goto done;
+        pairs_sum+=pairs; plain_time_sum+=plain_time;
+        plain_rate_sum+=plain_time?(double)pairs/plain_time:0;
+        plain_collisions_sum+=plain_collisions; edit_time_sum+=edit_time;
+        edit_rate_sum+=edit_time?(double)pairs/edit_time:0;
+        edit_collisions_sum+=edit_collisions;
+        all_collisions_sum+=all_collisions;
         for (split=0;split<=edits;++split)
-            printf(",%zu",split_collisions[split]);
-        putchar('\n');
+            split_collisions_sum[split]+=split_collisions[split];
     }
+    status=0;
+    printf("%s,%zu,%.3f,%.6f,%.3f,%.3f,%.6f,%.3f,%.3f,%.3f",
+           filename,repeats,pairs_sum/repeats,plain_time_sum/repeats,
+           plain_rate_sum/repeats,plain_collisions_sum/repeats,
+           edit_time_sum/repeats,edit_rate_sum/repeats,
+           edit_collisions_sum/repeats,all_collisions_sum/repeats);
+    for (split=0;split<=edits;++split)
+        printf(",%.3f",split_collisions_sum[split]/repeats);
+    putchar('\n');
+done:
     free(seed2); free(seed1); free(s2); free(s1);
     free(line2); free(line1); fclose(input);
     return status;
 }
 
 int main(int argc,char **argv) {
-    size_t n,k,d,edits,i; SubseqHashTables plain={0},edit={0}; int status=0;
-    if (argc<6 || parse_size(argv[1],&n) || parse_size(argv[2],&k) ||
+    size_t n,k,d,edits,repeats,i; int status=0;
+    uint64_t seed_base=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
+    if (argc<7 || parse_size(argv[1],&n) || parse_size(argv[2],&k) ||
         parse_size(argv[3],&d) || parse_size(argv[4],&edits) ||
-        !d || k>n || edits>n || edits>=32) {
-        fprintf(stderr,"usage: %s n k D E FILE...\n",argv[0]);
+        parse_size(argv[5],&repeats) || !d || !repeats ||
+        k>n || edits>n || edits>=32) {
+        fprintf(stderr,"usage: %s n k D E repeats FILE...\n",argv[0]);
         return EXIT_FAILURE;
     }
-    if (subseqhash_tables_init(&edit,n,d,UINT64_C(0x02468ace13579bdf))) {
-        fputs("ABC table allocation failed\n",stderr); status=1; goto done;
-    }
-    plain=edit;
-    plain.k=k;
-    printf("file,pairs,subseqhash_seconds,subseqhash_pairs_per_second,subseqhash_collisions,edit_seconds,edit_pairs_per_second,edit_any_seed_collisions,edit_all_seeds_collisions");
+    printf("file,repeats,average_pairs,average_subseqhash_seconds,"
+           "average_subseqhash_pairs_per_second,"
+           "average_subseqhash_collisions,average_edit_seconds,"
+           "average_edit_pairs_per_second,average_edit_any_seed_collisions,"
+           "average_edit_all_seeds_collisions");
     for (i=0;i<=edits;++i)
-        printf(",edit_Es%zu_Ed%zu_collisions",i,edits-i);
+        printf(",average_edit_Es%zu_Ed%zu_collisions",i,edits-i);
     putchar('\n');
-    for (i=5;i<(size_t)argc;++i)
-        if (benchmark_file(argv[i],n,k,edits,&plain,&edit)) { status=1; break; }
-done:
-    subseqhash_tables_destroy(&edit);
+    for (i=6;i<(size_t)argc;++i)
+        if (benchmark_file(argv[i],n,k,d,edits,repeats,
+                           seed_base)) { status=1; break; }
     return status?EXIT_FAILURE:EXIT_SUCCESS;
 }
