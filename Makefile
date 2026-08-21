@@ -7,7 +7,7 @@ LDLIBS ?=
 SRC_DIR := src
 BUILD_DIR := build
 SIMD_BUILD_DIR := build/simd
-SIMD_CFLAGS ?= -O3 -DNDEBUG -mavx512f -mavx512bw -mavx512vl
+SIMD_CFLAGS ?= -O3 -mavx512f -mavx512bw -mavx512vl
 TARGET := $(BUILD_DIR)/test_subsequence_scores
 BENCHMARK := $(BUILD_DIR)/benchmark_subsequence_scores
 WITNESS_GENERATOR := $(BUILD_DIR)/generate_witnesses
@@ -19,7 +19,9 @@ EDIT_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_edit_collisions
 SUBSEQHASH_ADJACENT_TEST := $(BUILD_DIR)/test_subseqhash_adjacent
 ADJACENT_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_adjacent_collisions
 SUBSEQHASH_EDITS_I16_TEST := $(BUILD_DIR)/test_subseqhash_edits_i16
+SUBSEQHASH_EDITS_I8_TEST := $(BUILD_DIR)/test_subseqhash_edits_i8
 SUBSEQHASH_EDITS_I16_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash_edits_i16
+SUBSEQHASH_EDITS_I8_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash_edits_i8
 I16_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_i16_collisions
 SUBSEQHASH_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash
 LIB_OBJECT := $(BUILD_DIR)/subsequence_scores.o
@@ -37,18 +39,22 @@ all: $(TARGET) \
 	$(SUBSEQHASH_ADJACENT_TEST) \
 	$(ADJACENT_COLLISION_BENCHMARK) \
 	$(SUBSEQHASH_EDITS_I16_TEST) \
+	$(SUBSEQHASH_EDITS_I8_TEST) \
 	$(SUBSEQHASH_EDITS_I16_BENCHMARK) \
+	$(SUBSEQHASH_EDITS_I8_BENCHMARK) \
 	$(I16_COLLISION_BENCHMARK) \
 	$(SUBSEQHASH_BENCHMARK)
 
 # Build every program that exercises the SIMD subseqhash-edits implementation.
 # A separate object directory prevents non-SIMD objects from a prior ordinary
 # build from being silently reused.
-simd:
+simd: clean-simd
 	$(MAKE) BUILD_DIR=$(SIMD_BUILD_DIR) \
 		CFLAGS="$(CFLAGS) $(SIMD_CFLAGS)" \
 		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i16 \
+		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i16 \
+		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_i16_collisions
 
 $(BUILD_DIR):
@@ -63,12 +69,13 @@ $(BUILD_DIR)/test_subsequence_scores.o: $(SRC_DIR)/test_subsequence_scores.c $(S
 $(TARGET): $(LIB_OBJECT) $(BUILD_DIR)/test_subsequence_scores.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(TARGET) $(SUBSEQHASH_TEST) $(SUBSEQHASH_EDITS_TEST) $(SUBSEQHASH_ADJACENT_TEST) $(SUBSEQHASH_EDITS_I16_TEST)
+test: $(TARGET) $(SUBSEQHASH_TEST) $(SUBSEQHASH_EDITS_TEST) $(SUBSEQHASH_ADJACENT_TEST) $(SUBSEQHASH_EDITS_I16_TEST) $(SUBSEQHASH_EDITS_I8_TEST)
 	./$(TARGET)
 	./$(SUBSEQHASH_TEST)
 	./$(SUBSEQHASH_EDITS_TEST)
 	./$(SUBSEQHASH_ADJACENT_TEST)
 	./$(SUBSEQHASH_EDITS_I16_TEST)
+	./$(SUBSEQHASH_EDITS_I8_TEST)
 
 $(BUILD_DIR)/benchmark_subsequence_scores.o: $(SRC_DIR)/benchmark_subsequence_scores.c $(SRC_DIR)/subsequence_scores.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -135,6 +142,21 @@ $(SUBSEQHASH_EDITS_I16_BENCHMARK): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseq
 benchmark-subseqhash-edits-i16: $(SUBSEQHASH_EDITS_I16_BENCHMARK)
 	./$(SUBSEQHASH_EDITS_I16_BENCHMARK)
 
+$(BUILD_DIR)/subseqhash_edits_i8.o: $(SRC_DIR)/subseqhash_edits_i8.c $(SRC_DIR)/subseqhash_edits_i8.h $(SRC_DIR)/subseqhash_edits.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/test_subseqhash_edits_i8.o: $(SRC_DIR)/test_subseqhash_edits_i8.c $(SRC_DIR)/subseqhash_edits_i8.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(SUBSEQHASH_EDITS_I8_TEST): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_edits_i8.o $(BUILD_DIR)/test_subseqhash_edits_i8.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
+$(BUILD_DIR)/benchmark_subseqhash_edits_i8.o: $(SRC_DIR)/benchmark_subseqhash_edits_i8.c $(SRC_DIR)/subseqhash_edits_i8.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(SUBSEQHASH_EDITS_I8_BENCHMARK): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_edits_i8.o $(BUILD_DIR)/benchmark_subseqhash_edits_i8.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
 $(BUILD_DIR)/benchmark_i16_collisions.o: $(SRC_DIR)/benchmark_i16_collisions.c $(SRC_DIR)/subseqhash_edits_i16.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -195,7 +217,9 @@ sanitize: | $(BUILD_DIR)
 clean-simd:
 	rm -f $(SIMD_BUILD_DIR)/*.o \
 		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i16 \
+		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i16 \
+		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_i16_collisions
 	rmdir $(SIMD_BUILD_DIR) 2>/dev/null || true
 
@@ -209,7 +233,9 @@ clean: clean-simd
 		$(SUBSEQHASH_ADJACENT_TEST) \
 		$(ADJACENT_COLLISION_BENCHMARK) \
 		$(SUBSEQHASH_EDITS_I16_TEST) \
+		$(SUBSEQHASH_EDITS_I8_TEST) \
 		$(SUBSEQHASH_EDITS_I16_BENCHMARK) \
+		$(SUBSEQHASH_EDITS_I8_BENCHMARK) \
 		$(I16_COLLISION_BENCHMARK) \
 		$(SUBSEQHASH_BENCHMARK) \
 		$(BUILD_DIR)/test_subsequence_scores_sanitized
