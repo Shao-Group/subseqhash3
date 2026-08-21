@@ -19,7 +19,15 @@ LIB_OBJECT := $(BUILD_DIR)/subsequence_scores.o
 
 .PHONY: all test benchmark benchmark-subseqhash benchmark-edit-collisions witnesses collision-estimator simulate-edit-pairs sanitize clean
 
-all: $(TARGET)
+all: $(TARGET) \
+	$(BENCHMARK) \
+	$(WITNESS_GENERATOR) \
+	$(COLLISION_ESTIMATOR) \
+	$(SUBSEQHASH_TEST) \
+	$(SUBSEQHASH_EDITS_TEST) \
+	$(EDIT_PAIR_SIMULATOR) \
+	$(EDIT_COLLISION_BENCHMARK) \
+	$(SUBSEQHASH_BENCHMARK)
 
 $(BUILD_DIR):
 	mkdir -p $@
