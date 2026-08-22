@@ -29,7 +29,7 @@ static size_t subtract_mod(size_t x,size_t y,size_t modulus) {
 int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
                                uint64_t seed) {
     static const int8_t b1[4]={1,1,-1,-1},b2[4]={1,-1,1,-1};
-    size_t cells,mask_cells,i,r,a;
+    size_t cells,mask_cells,i,r,a,tail,lane;
     if (!t || !d || k>(size_t)((INT16_MAX-1)/127) ||
         k>SIZE_MAX/d || k*d>SIZE_MAX/4 ||
         k*d*4>SIZE_MAX/sizeof(*t->A)) return -1;
@@ -41,11 +41,15 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
     t->B1=malloc(cells?cells:1); t->B2=malloc(cells?cells:1);
     t->signed_A=malloc((cells?cells:1)*sizeof(*t->signed_A));
     t->B1_masks=calloc(mask_cells?mask_cells:1,sizeof(*t->B1_masks));
+    t->wrap_indices=malloc(32*32*sizeof(*t->wrap_indices));
     t->C=malloc((k?k*4:1)*sizeof(*t->C));
     if (!t->A || !t->B1 || !t->B2 || !t->signed_A ||
-        !t->B1_masks || !t->C) {
+        !t->B1_masks || !t->wrap_indices || !t->C) {
         subseqhash_i8_tables_destroy(t); return -1;
     }
+    for (tail=0;tail<32;++tail) for (lane=0;lane<32;++lane)
+        t->wrap_indices[tail*32+lane]=(uint16_t)(
+            lane<tail?lane:32+lane-tail);
     for (i=0;i<cells;++i)
         t->A[i]=(int8_t)(1u+(unsigned)(next_random(&seed)%127u));
     for (i=0;i<k;++i) for (r=0;r<d;++r) {
@@ -78,7 +82,7 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
 
 void subseqhash_i8_tables_destroy(SubseqHashI8Tables *t) {
     if (!t) return;
-    free(t->C); free(t->B1_masks); free(t->signed_A);
+    free(t->C); free(t->wrap_indices); free(t->B1_masks); free(t->signed_A);
     free(t->B2); free(t->B1); free(t->A);
     memset(t,0,sizeof(*t));
 }
@@ -181,6 +185,63 @@ static void update_parent_vector(uint8_t *decision,size_t offset,
 #endif
 }
 
+#if defined(__AVX512VL__)
+static inline __m512i load_wrapped_i16(const int16_t *source,size_t d,
+                                       size_t q,const uint16_t *indices) {
+    if (q+32<=d)
+        return _mm512_loadu_si512((const void *)(source+q));
+    {
+        const unsigned tail=(unsigned)(d-q);
+        const __mmask32 low=(__mmask32)((UINT32_C(1)<<tail)-1u);
+        const __m512i end=_mm512_maskz_loadu_epi16(low,source+q);
+        const __m512i start=_mm512_loadu_si512((const void *)source);
+        const __m512i index=_mm512_loadu_si512(
+            (const void *)(indices+tail*32));
+        return _mm512_permutex2var_epi16(end,index,start);
+    }
+}
+
+static void update_avx512_aligned(
+    const int16_t *src_mn,const int16_t *src_mx,
+    int16_t *dst_mn,int16_t *dst_mx,const int8_t *signed_A,
+    const uint32_t *B1_masks,const uint16_t *wrap_indices,
+    uint8_t *decision,size_t d,size_t shift,unsigned symbol) {
+    const __m512i infinity=_mm512_set1_epi16(INT16_MAX);
+    const __m512i zero=_mm512_setzero_si512();
+    size_t r;
+    for (r=0;r<d;r+=32) {
+        const size_t q=r>=shift?r-shift:r+d-shift;
+        const __m512i smn=load_wrapped_i16(
+            src_mn,d,q,wrap_indices);
+        const __m512i smx=load_wrapped_i16(
+            src_mx,d,q,wrap_indices);
+        const __m512i dmn=_mm512_loadu_si512((const void *)(dst_mn+r));
+        const __m512i dmx=_mm512_loadu_si512((const void *)(dst_mx+r));
+        const __m256i a8=_mm256_loadu_si256(
+            (const __m256i *)(signed_A+r));
+        const __m512i add=_mm512_cvtepi8_epi16(a8);
+        const __mmask32 positive=(__mmask32)B1_masks[r/32];
+        const __mmask32 reachable=
+            _mm512_cmpneq_epi16_mask(smn,infinity);
+        const __m512i lo=_mm512_add_epi16(
+            _mm512_mask_blend_epi16(positive,
+                _mm512_sub_epi16(zero,smx),smn),add);
+        const __m512i hi=_mm512_add_epi16(
+            _mm512_mask_blend_epi16(positive,
+                _mm512_sub_epi16(zero,smn),smx),add);
+        const __mmask32 minmask=reachable&
+            _mm512_cmplt_epi16_mask(lo,dmn);
+        const __mmask32 maxmask=reachable&
+            _mm512_cmpgt_epi16_mask(hi,dmx);
+        _mm512_mask_storeu_epi16(dst_mn+r,minmask,lo);
+        _mm512_mask_storeu_epi16(dst_mx+r,maxmask,hi);
+        if (minmask || maxmask)
+            update_parent_vector(decision,r,(__mmask32)UINT32_MAX,
+                                 positive,minmask,maxmask,symbol);
+    }
+}
+#endif
+
 static void update_avx512_block(
     const int16_t *src_mn,const int16_t *src_mx,
     int16_t *dst_mn,int16_t *dst_mx,
@@ -249,10 +310,20 @@ static void update_shifted(const int16_t *src_mn,const int16_t *src_mx,
                            int16_t *dst_mn,int16_t *dst_mx,
                            const int8_t *A,const int8_t *B1,
                            const int8_t *B2,const int8_t *signed_A,
-                           const uint32_t *B1_masks,uint8_t *decision,
-                           size_t d,size_t shift,unsigned symbol) {
+                           const uint32_t *B1_masks,const uint16_t *wrap_indices,
+                           uint8_t *decision,
+                           size_t d,size_t shift,unsigned symbol,int use_aligned) {
     (void)signed_A;
     (void)B1_masks;
+    (void)wrap_indices;
+    (void)use_aligned;
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+    if (use_aligned && !(d&31u)) {
+        update_avx512_aligned(src_mn,src_mx,dst_mn,dst_mx,signed_A,
+                              B1_masks,wrap_indices,decision,d,shift,symbol);
+        return;
+    }
+#endif
 #if HAVE_AVX512_I8_DP
 #define UPDATE_RANGE update_avx512
     A=signed_A;
@@ -268,9 +339,9 @@ static void update_shifted(const int16_t *src_mn,const int16_t *src_mx,
 #undef UPDATE_RANGE
 }
 
-int subseqhash_compute_all_edit_splits_i8(
+static int compute_all_edit_splits_i8_impl(
     const uint8_t *s,size_t n,size_t total_edits,
-    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results,int use_aligned) {
     size_t d,e_count,band,parent_states,l,h,e,q,r,a,result_index;
     int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
     uint8_t *parent=NULL;
@@ -324,8 +395,9 @@ int subseqhash_compute_all_edit_splits_i8(
                     t->A+table_base,t->B1+table_base,t->B2+table_base,
                     t->signed_A+table_base,
                     t->B1_masks+(row*4+a)*t->blocks,
+                    t->wrap_indices,
                     parent+I8_PARENT(l,h,e+changed,0),d,
-                    t->C[4*row+a],(unsigned)a);
+                    t->C[4*row+a],(unsigned)a,use_aligned);
             }
         }
         { int16_t *tmp=old_mn; old_mn=new_mn; new_mn=tmp;
@@ -372,9 +444,21 @@ done:
 #undef I8_STATE
 }
 
+int subseqhash_compute_all_edit_splits_i8(
+    const uint8_t *s,size_t n,size_t total_edits,
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
+    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,1);
+}
+
+int subseqhash_compute_all_edit_splits_i8_legacy(
+    const uint8_t *s,size_t n,size_t total_edits,
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
+    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,0);
+}
+
 const char *subseqhash_edits_i8_backend(void) {
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
-    return "AVX-512BW (32 x int16 states)";
+    return "AVX-512BW (32 x int16 states; aligned vpermt2w)";
 #elif HAVE_AVX512_I8_DP
     return "AVX-512BW (32 x int16 states; scalar parents)";
 #else

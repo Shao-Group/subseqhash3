@@ -20,7 +20,7 @@ static int parse_size(const char *text,size_t *value) {
 }
 int main(int argc,char **argv) {
     size_t n=50,edits=10,d=31,repeats=100,rep,i,split;
-    uint8_t *s; double t0,t1,t2;
+    uint8_t *s; double t0,t1,t2,t3;
     SubseqHashI8Tables compact;
     SubseqHashTables reference;
     if ((argc>1&&parse_size(argv[1],&n)) ||
@@ -48,11 +48,18 @@ int main(int argc,char **argv) {
     t1=seconds();
     for (rep=0;rep<repeats;++rep) {
         SubseqHashEditResult result[32];
-        if (subseqhash_compute_all_edit_splits_i8(
+        if (subseqhash_compute_all_edit_splits_i8_legacy(
                 s,n,edits,&compact,result)) return EXIT_FAILURE;
         subseqhash_edit_results_destroy(result,edits+1);
     }
     t2=seconds();
+    for (rep=0;rep<repeats;++rep) {
+        SubseqHashEditResult result[32];
+        if (subseqhash_compute_all_edit_splits_i8(
+                s,n,edits,&compact,result)) return EXIT_FAILURE;
+        subseqhash_edit_results_destroy(result,edits+1);
+    }
+    t3=seconds();
     {
         SubseqHashEditResult a[32],b[32];
         if (subseqhash_compute_all_edit_splits(s,n,edits,&reference,a) ||
@@ -71,9 +78,12 @@ int main(int argc,char **argv) {
            n,edits,d,repeats,subseqhash_edits_i8_backend());
     printf("double reference: %.6f s, %.6f s/call\n",
            t1-t0,(t1-t0)/repeats);
-    printf("i8/i16:          %.6f s, %.6f s/call\n",
+    printf("i8 legacy:       %.6f s, %.6f s/call\n",
            t2-t1,(t2-t1)/repeats);
-    printf("speedup:          %.2fx\n",(t1-t0)/(t2-t1));
+    printf("i8 optimized:    %.6f s, %.6f s/call\n",
+           t3-t2,(t3-t2)/repeats);
+    printf("vs double:       %.2fx\n",(t1-t0)/(t3-t2));
+    printf("vs legacy i8:    %.2fx\n",(t2-t1)/(t3-t2));
     subseqhash_tables_destroy(&reference);
     subseqhash_i8_tables_destroy(&compact); free(s);
     return EXIT_SUCCESS;

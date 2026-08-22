@@ -10,6 +10,7 @@ typedef struct {
     int8_t *signed_A;
     uint32_t *B1_masks;
     size_t blocks;
+    uint16_t *wrap_indices;
     size_t *C;
 } SubseqHashI8Tables;
 
@@ -23,6 +24,11 @@ int subseqhash_i8_tables_make_double(const SubseqHashI8Tables *source,
                                       SubseqHashTables *destination);
 
 int subseqhash_compute_all_edit_splits_i8(
+    const uint8_t *s, size_t n, size_t total_edits,
+    const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
+
+/* Same DP using the pre-aligned-kernel split-wrap implementation. */
+int subseqhash_compute_all_edit_splits_i8_legacy(
     const uint8_t *s, size_t n, size_t total_edits,
     const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
 
