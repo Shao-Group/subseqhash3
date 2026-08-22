@@ -79,10 +79,14 @@ static int benchmark_file(const char *filename,const char *seed_filename,
     double any_sum=0,all_sum=0,split_sum[32]={0};
     int status=-1;
     if (!input) { perror(filename); return -1; }
-    seed_output=fopen(seed_filename,"w");
-    if (!seed_output) { perror(seed_filename); fclose(input); return -1; }
-    if (fputs("repeat,pair,input1,input2,Es,Ed,psi1,omega1,seed1,psi2,omega2,seed2,same_psi_omega,same_seed\n",
-              seed_output)==EOF) goto done;
+    if (seed_filename) {
+        seed_output=fopen(seed_filename,"w");
+        if (!seed_output) {
+            perror(seed_filename); fclose(input); return -1;
+        }
+        if (fputs("repeat,pair,input1,input2,Es,Ed,psi1,omega1,seed1,psi2,omega2,seed2,same_psi_omega,same_seed\n",
+                  seed_output)==EOF) goto done;
+    }
     s1=malloc(n?n:1); s2=malloc(n?n:1);
     if (!s1 || !s2) goto done;
 
@@ -139,7 +143,8 @@ static int benchmark_file(const char *filename,const char *seed_filename,
                 break;
             }
             edit_time+=seconds()-t0;
-            if (write_pair_seed_records(seed_output,repeat,pairs+1,line1,line2,
+            if (seed_output &&
+                write_pair_seed_records(seed_output,repeat,pairs+1,line1,line2,
                                         left,right,edits)) {
                 fputs("failed writing seed file\n",stderr);
                 subseqhash_edit_results_destroy(right,edits+1);
@@ -170,8 +175,10 @@ static int benchmark_file(const char *filename,const char *seed_filename,
         for (split=0;split<=edits;++split)
             split_sum[split]+=split_collisions[split];
     }
-    if (fflush(seed_output) || ferror(seed_output)) goto done;
-    fprintf(stderr,"seed file: %s\n",seed_filename);
+    if (seed_output) {
+        if (fflush(seed_output) || ferror(seed_output)) goto done;
+        fprintf(stderr,"seed file: %s\n",seed_filename);
+    }
     status=0;
     printf("%s,%zu,%.3f,%.6f,%.3f,%.3f,%.6f,%.3f,%.3f,%.3f",
            filename,repeats,pairs_sum/repeats,baseline_time_sum/repeats,
@@ -191,12 +198,12 @@ int main(int argc,char **argv) {
     size_t n,k,d,edits,repeats,i;
     uint64_t seed_base=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
     int status;
-    if (argc!=8 || parse_size(argv[1],&n) || parse_size(argv[2],&k) ||
+    if ((argc!=7 && argc!=8) || parse_size(argv[1],&n) || parse_size(argv[2],&k) ||
         parse_size(argv[3],&d) || parse_size(argv[4],&edits) ||
         parse_size(argv[5],&repeats) || !d || (d&15u) || !repeats ||
         k>n || edits>n || edits>=32 || n-k>=32) {
         fprintf(stderr,
-                "usage: %s n k D edits repeats PAIRS_FILE SEED_FILE  (D %% 16 == 0)\n",
+                "usage: %s n k D edits repeats PAIRS_FILE [SEED_FILE]  (D %% 16 == 0)\n",
                 argv[0]);
         return EXIT_FAILURE;
     }
@@ -210,7 +217,8 @@ int main(int argc,char **argv) {
     for (i=0;i<=edits;++i)
         printf(",average_edit_Es%zu_Ed%zu_collisions",i,edits-i);
     putchar('\n');
-    status=benchmark_file(argv[6],argv[7],n,k,d,edits,repeats,
+    status=benchmark_file(argv[6],argc==8?argv[7]:NULL,
+                          n,k,d,edits,repeats,
                           seed_base);
     return status?EXIT_FAILURE:EXIT_SUCCESS;
 }
