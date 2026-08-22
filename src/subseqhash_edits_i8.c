@@ -444,12 +444,175 @@ done:
 #undef I8_STATE
 }
 
+typedef struct {
+    uint32_t parent;
+    size_t position;
+    uint16_t length;
+    uint8_t symbol;
+} I8CanonicalNode;
+
+typedef struct {
+    uint32_t prefix;
+    size_t position;
+    uint8_t symbol;
+    uint8_t append;
+} I8CanonicalCandidate;
+
+typedef struct {
+    const uint8_t *s;
+    const SubseqHashI8Tables *tables;
+    const int16_t *snap_mn,*snap_mx;
+    size_t n,edits,ec,d,band,layers;
+    uint32_t *memo;
+    I8CanonicalNode *nodes;
+    size_t node_count,node_capacity;
+    uint8_t *seed_a,*seed_b;
+    size_t *positions_a,*positions_b;
+    int failed;
+} I8CanonicalContext;
+
+static size_t canonical_state(const I8CanonicalContext *c,size_t h,
+                              size_t e,size_t r) {
+    return ((h*c->ec+e)*c->d)+r;
+}
+static int16_t canonical_score(const I8CanonicalContext *c,int type,
+                               size_t l,size_t h,size_t e,size_t r) {
+    const size_t offset=l*c->band+canonical_state(c,h,e,r);
+    return type==1?c->snap_mn[offset]:c->snap_mx[offset];
+}
+static uint32_t canonical_add_node(I8CanonicalContext *c,uint32_t parent,
+                                   uint8_t symbol,size_t position) {
+    I8CanonicalNode *grown;
+    uint32_t id;
+    if (c->node_count>=UINT32_MAX) { c->failed=1; return 0; }
+    if (c->node_count==c->node_capacity) {
+        size_t capacity=c->node_capacity?c->node_capacity*2:1024;
+        if (capacity<c->node_capacity ||
+            capacity>SIZE_MAX/sizeof(*c->nodes)) {
+            c->failed=1; return 0;
+        }
+        grown=realloc(c->nodes,capacity*sizeof(*c->nodes));
+        if (!grown) { c->failed=1; return 0; }
+        c->nodes=grown; c->node_capacity=capacity;
+    }
+    id=(uint32_t)c->node_count++;
+    c->nodes[id].parent=parent;
+    c->nodes[id].position=position;
+    c->nodes[id].symbol=symbol;
+    c->nodes[id].length=(uint16_t)(c->nodes[parent].length+1u);
+    return id;
+}
+static size_t canonical_materialize(const I8CanonicalContext *c,
+                                    I8CanonicalCandidate candidate,
+                                    uint8_t *seed,size_t *positions) {
+    uint32_t node=candidate.prefix;
+    size_t length=c->nodes[node].length+(size_t)candidate.append;
+    size_t cursor=length;
+    if (candidate.append) {
+        seed[--cursor]=candidate.symbol;
+        positions[cursor]=candidate.position;
+    }
+    while (node!=1u) {
+        seed[--cursor]=c->nodes[node].symbol;
+        positions[cursor]=c->nodes[node].position;
+        node=c->nodes[node].parent;
+    }
+    return length;
+}
+static int canonical_candidate_less(I8CanonicalContext *c,
+                                    I8CanonicalCandidate a,
+                                    I8CanonicalCandidate b) {
+    size_t length_a=canonical_materialize(
+        c,a,c->seed_a,c->positions_a);
+    size_t length_b=canonical_materialize(
+        c,b,c->seed_b,c->positions_b);
+    size_t i,length=length_a<length_b?length_a:length_b;
+    for (i=0;i<length;++i)
+        if (c->seed_a[i]!=c->seed_b[i])
+            return c->seed_a[i]<c->seed_b[i];
+    if (length_a!=length_b) return length_a<length_b;
+    for (i=0;i<length;++i)
+        if (c->positions_a[i]!=c->positions_b[i])
+            return c->positions_a[i]<c->positions_b[i];
+    return 0;
+}
+
+static uint32_t canonical_witness(I8CanonicalContext *c,int type,size_t l,
+                                  size_t h,size_t e,size_t r) {
+    const size_t state=canonical_state(c,h,e,r);
+    const size_t memo_offset=((size_t)(type-1)*c->layers+l)*c->band+state;
+    const int16_t target=canonical_score(c,type,l,h,e,r);
+    I8CanonicalCandidate best={0,0,0,0};
+    int have_best=0;
+    unsigned symbol;
+    uint32_t cached=c->memo[memo_offset];
+    if (cached) return cached;
+    if (!l) {
+        if (!h && !e && !r && target==0) return 1u;
+        return 0;
+    }
+    if (h && canonical_score(c,type,l-1,h-1,e,r)==target) {
+        uint32_t prefix=canonical_witness(c,type,l-1,h-1,e,r);
+        if (prefix) {
+            best.prefix=prefix; best.append=0; have_best=1;
+        }
+    }
+    {
+        const size_t original=c->s[l-1],row=(l-1)-h;
+        for (symbol=0;symbol<4;++symbol) {
+            const size_t changed=symbol!=original;
+            size_t previous_r,base;
+            int previous_type;
+            int16_t previous,add,candidate_score;
+            I8CanonicalCandidate candidate;
+            uint32_t prefix;
+            if (changed>e || row>=c->tables->k) continue;
+            previous_r=subtract_mod(
+                r,c->tables->C[4*row+symbol],c->d);
+            base=(row*4+symbol)*c->d+r;
+            add=c->tables->signed_A[base];
+            if (type==1) {
+                previous_type=c->tables->B1[base]>0?1:2;
+                previous=canonical_score(c,previous_type,l-1,h,
+                                         e-changed,previous_r);
+                if (previous_type==1) candidate_score=(int16_t)(previous+add);
+                else candidate_score=(int16_t)(-previous+add);
+            } else {
+                previous_type=c->tables->B1[base]>0?2:1;
+                previous=canonical_score(c,previous_type,l-1,h,
+                                         e-changed,previous_r);
+                if (previous_type==2) candidate_score=(int16_t)(previous+add);
+                else candidate_score=(int16_t)(-previous+add);
+            }
+            if ((previous_type==1 && previous==INT16_MAX) ||
+                (previous_type==2 && previous==INT16_MIN) ||
+                candidate_score!=target) continue;
+            prefix=canonical_witness(c,previous_type,l-1,h,e-changed,
+                                     previous_r);
+            if (!prefix) continue;
+            candidate.prefix=prefix; candidate.position=l-1;
+            candidate.symbol=(uint8_t)symbol; candidate.append=1;
+            if (!have_best || canonical_candidate_less(c,candidate,best)) {
+                best=candidate; have_best=1;
+            }
+        }
+    }
+    if (!have_best) return 0;
+    if (best.append)
+        cached=canonical_add_node(c,best.prefix,best.symbol,best.position);
+    else cached=best.prefix;
+    if (!cached) return 0;
+    c->memo[memo_offset]=cached;
+    return cached;
+}
+
 int subseqhash_compute_all_edit_splits_i8_twopass(
     const uint8_t *s,size_t n,size_t total_edits,
     const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
     size_t d,ec,band,layers,layer_cells,l,h,e,q,r,a,result_index;
     int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
     int16_t *snapshots=NULL,*snap_mn,*snap_mx;
+    I8CanonicalContext canonical={0};
     int status=-1;
     if (!t || !results || !t->d || t->k<n || total_edits>n ||
         (n&&!s)) return -1;
@@ -458,7 +621,8 @@ int subseqhash_compute_all_edit_splits_i8_twopass(
         ec*ec>SIZE_MAX/d) return -1;
     band=ec*ec*d;
     if (band>SIZE_MAX/(4*sizeof(*scores)) || layers>SIZE_MAX/band ||
-        layers*band>SIZE_MAX/(2*sizeof(*snapshots))) return -1;
+        layers*band>SIZE_MAX/(2*sizeof(*snapshots)) ||
+        layers*band>SIZE_MAX/(2*sizeof(*canonical.memo))) return -1;
     layer_cells=layers*band;
     memset(results,0,ec*sizeof(*results));
     scores=malloc(4*band*sizeof(*scores));
@@ -467,6 +631,19 @@ int subseqhash_compute_all_edit_splits_i8_twopass(
     old_mn=scores; old_mx=old_mn+band;
     new_mn=old_mx+band; new_mx=new_mn+band;
     snap_mn=snapshots; snap_mx=snapshots+layer_cells;
+    canonical.s=s; canonical.tables=t; canonical.snap_mn=snap_mn;
+    canonical.snap_mx=snap_mx; canonical.n=n; canonical.edits=total_edits;
+    canonical.ec=ec; canonical.d=d; canonical.band=band;
+    canonical.layers=layers; canonical.node_capacity=1024;
+    canonical.node_count=2;
+    canonical.memo=calloc(2*layer_cells,sizeof(*canonical.memo));
+    canonical.nodes=calloc(canonical.node_capacity,sizeof(*canonical.nodes));
+    canonical.seed_a=malloc(n?n:1); canonical.seed_b=malloc(n?n:1);
+    canonical.positions_a=malloc((n?n:1)*sizeof(*canonical.positions_a));
+    canonical.positions_b=malloc((n?n:1)*sizeof(*canonical.positions_b));
+    if (!canonical.memo || !canonical.nodes || !canonical.seed_a ||
+        !canonical.seed_b || !canonical.positions_a ||
+        !canonical.positions_b) goto done;
     for (q=0;q<band;++q) {
         old_mn[q]=new_mn[q]=INT16_MAX;
         old_mx[q]=new_mx[q]=INT16_MIN;
@@ -531,55 +708,28 @@ int subseqhash_compute_all_edit_splits_i8_twopass(
         out->omega=(double)(type==1?
             TP_MN(n,deletions,substitutions,r):
             TP_MX(n,deletions,substitutions,r));
-        l=n; h=deletions; e=substitutions; q=k;
-        while (q) {
-            const size_t original=s[l-1],row=(l-1)-h;
-            int16_t best_mn=INT16_MAX,best_mx=INT16_MIN;
-            unsigned min_code=0,max_code=0,code;
-            if (h) {
-                best_mn=TP_MN(l-1,h-1,e,r);
-                best_mx=TP_MX(l-1,h-1,e,r);
-            }
-            for (a=0;a<4;++a) {
-                const size_t changed=a!=original;
-                size_t previous_r,base;
-                int16_t smn,smx,lo,hi,add;
-                unsigned min_type,max_type;
-                if (changed>e) continue;
-                previous_r=subtract_mod(r,t->C[4*row+a],d);
-                smn=TP_MN(l-1,h,e-changed,previous_r);
-                if (smn==INT16_MAX) continue;
-                smx=TP_MX(l-1,h,e-changed,previous_r);
-                base=(row*4+a)*d+r; add=t->signed_A[base];
-                if (t->B1[base]>0) {
-                    lo=(int16_t)(smn+add); hi=(int16_t)(smx+add);
-                    min_type=1; max_type=2;
-                } else {
-                    lo=(int16_t)(-smx+add); hi=(int16_t)(-smn+add);
-                    min_type=2; max_type=1;
-                }
-                if (lo<best_mn) {
-                    best_mn=lo; min_code=min_type+(unsigned)a*2u;
-                }
-                if (hi>best_mx) {
-                    best_mx=hi; max_code=max_type+(unsigned)a*2u;
-                }
-            }
-            if (best_mn!=TP_MN(l,h,e,r) ||
-                best_mx!=TP_MX(l,h,e,r)) goto done;
-            code=type==1?min_code:max_code;
-            if (!code) { --h; --l; continue; }
-            --code; a=code/2u; type=(int)(code%2u)+1;
-            out->seed[q-1]=(uint8_t)a; out->positions[q-1]=l-1;
-            out->substituted[q-1]=(uint8_t)(a!=s[l-1]);
-            if (a!=s[l-1]) --e;
-            r=subtract_mod(r,t->C[4*(q-1)+a],d);
-            --q; --l;
+        {
+            I8CanonicalCandidate whole;
+            uint32_t node=canonical_witness(&canonical,type,n,deletions,
+                                                substitutions,r);
+            size_t length;
+            if (!node || canonical.failed) goto done;
+            whole.prefix=node; whole.position=0; whole.symbol=0;
+            whole.append=0;
+            length=canonical_materialize(&canonical,whole,out->seed,
+                                         out->positions);
+            if (length!=k) goto done;
+            for (q=0;q<k;++q)
+                out->substituted[q]=(uint8_t)(
+                    out->seed[q]!=s[out->positions[q]]);
         }
     }
     status=0;
 done:
     if (status) subseqhash_edit_results_destroy(results,ec);
+    free(canonical.positions_b); free(canonical.positions_a);
+    free(canonical.seed_b); free(canonical.seed_a);
+    free(canonical.nodes); free(canonical.memo);
     free(snapshots); free(scores); return status;
 #undef TP_MX
 #undef TP_MN
