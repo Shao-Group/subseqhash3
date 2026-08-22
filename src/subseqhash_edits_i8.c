@@ -139,7 +139,7 @@ static void update_scalar(const int16_t *src_mn,const int16_t *src_mx,
             if (lo<dst_mn[r]) { dst_mn[r]=lo; min_type=2; }
             if (hi>dst_mx[r]) { dst_mx[r]=hi; max_type=1; }
         }
-        if (min_type || max_type)
+        if (decision && (min_type || max_type))
             save_parent(decision,r,symbol,min_type,max_type);
     }
 }
@@ -235,7 +235,7 @@ static void update_avx512_aligned(
             _mm512_cmpgt_epi16_mask(hi,dmx);
         _mm512_mask_storeu_epi16(dst_mn+r,minmask,lo);
         _mm512_mask_storeu_epi16(dst_mx+r,maxmask,hi);
-        if (minmask || maxmask)
+        if (decision && (minmask || maxmask))
             update_parent_vector(decision,r,(__mmask32)UINT32_MAX,
                                  positive,minmask,maxmask,symbol);
     }
@@ -285,7 +285,7 @@ static void update_avx512_block(
         __mmask32 maxmask=reachable&_mm512_cmpgt_epi16_mask(hi,dmx);
         _mm512_mask_storeu_epi16(dst_mn+r,minmask,lo);
         _mm512_mask_storeu_epi16(dst_mx+r,maxmask,hi);
-        if (minmask || maxmask)
+        if (decision && (minmask || maxmask))
             update_parent_vector(decision,r,active,positive,
                                  minmask,maxmask,symbol);
     }
@@ -442,6 +442,148 @@ done:
     free(parent); free(scores); return status;
 #undef I8_PARENT
 #undef I8_STATE
+}
+
+int subseqhash_compute_all_edit_splits_i8_twopass(
+    const uint8_t *s,size_t n,size_t total_edits,
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
+    size_t d,ec,band,layers,layer_cells,l,h,e,q,r,a,result_index;
+    int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
+    int16_t *snapshots=NULL,*snap_mn,*snap_mx;
+    int status=-1;
+    if (!t || !results || !t->d || t->k<n || total_edits>n ||
+        (n&&!s)) return -1;
+    d=t->d; ec=total_edits+1; layers=n+1;
+    if (!ec || ec>SIZE_MAX/sizeof(*results) || ec>SIZE_MAX/ec ||
+        ec*ec>SIZE_MAX/d) return -1;
+    band=ec*ec*d;
+    if (band>SIZE_MAX/(4*sizeof(*scores)) || layers>SIZE_MAX/band ||
+        layers*band>SIZE_MAX/(2*sizeof(*snapshots))) return -1;
+    layer_cells=layers*band;
+    memset(results,0,ec*sizeof(*results));
+    scores=malloc(4*band*sizeof(*scores));
+    snapshots=malloc(2*layer_cells*sizeof(*snapshots));
+    if (!scores || !snapshots) goto done;
+    old_mn=scores; old_mx=old_mn+band;
+    new_mn=old_mx+band; new_mx=new_mn+band;
+    snap_mn=snapshots; snap_mx=snapshots+layer_cells;
+    for (q=0;q<band;++q) {
+        old_mn[q]=new_mn[q]=INT16_MAX;
+        old_mx[q]=new_mx[q]=INT16_MIN;
+    }
+#define TP_STATE(H,E,R) ((((H)*ec+(E))*d)+(R))
+#define TP_MN(L,H,E,R) snap_mn[(L)*band+TP_STATE(H,E,R)]
+#define TP_MX(L,H,E,R) snap_mx[(L)*band+TP_STATE(H,E,R)]
+    old_mn[0]=old_mx[0]=0;
+    memcpy(snap_mn,old_mn,band*sizeof(*old_mn));
+    memcpy(snap_mx,old_mx,band*sizeof(*old_mx));
+    for (l=1;l<=n;++l) {
+        const size_t original=s[l-1];
+        const size_t previous_max_h=(l-1)<total_edits?
+            (l-1):total_edits;
+        if (original>3) goto done;
+        for (q=0;q<band;++q) {
+            new_mn[q]=INT16_MAX; new_mx[q]=INT16_MIN;
+        }
+        for (h=0;h<=previous_max_h && h<total_edits;++h)
+            for (e=0;e+h+1<=total_edits;++e) {
+                size_t src=TP_STATE(h,e,0),dst=TP_STATE(h+1,e,0);
+                memcpy(new_mn+dst,old_mn+src,d*sizeof(*new_mn));
+                memcpy(new_mx+dst,old_mx+src,d*sizeof(*new_mx));
+            }
+        for (h=0;h<=previous_max_h;++h) {
+            const size_t row=(l-1)-h;
+            for (e=0;e+h<=total_edits;++e) for (a=0;a<4;++a) {
+                const size_t changed=a!=original;
+                const size_t table_base=(row*4+a)*d;
+                if (e+h+changed>total_edits) continue;
+                update_shifted(old_mn+TP_STATE(h,e,0),
+                    old_mx+TP_STATE(h,e,0),
+                    new_mn+TP_STATE(h,e+changed,0),
+                    new_mx+TP_STATE(h,e+changed,0),
+                    t->A+table_base,t->B1+table_base,t->B2+table_base,
+                    t->signed_A+table_base,
+                    t->B1_masks+(row*4+a)*t->blocks,t->wrap_indices,
+                    NULL,d,t->C[4*row+a],(unsigned)a,1);
+            }
+        }
+        { int16_t *tmp=old_mn; old_mn=new_mn; new_mn=tmp;
+          tmp=old_mx; old_mx=new_mx; new_mx=tmp; }
+        memcpy(snap_mn+l*band,old_mn,band*sizeof(*old_mn));
+        memcpy(snap_mx+l*band,old_mx,band*sizeof(*old_mx));
+    }
+    for (result_index=0;result_index<ec;++result_index) {
+        SubseqHashEditResult *out=results+result_index;
+        size_t substitutions=result_index;
+        size_t deletions=total_edits-substitutions,k=n-deletions;
+        int type;
+        out->deletions=deletions; out->substitutions=substitutions;
+        out->length=k; out->seed=malloc(k?k:1);
+        out->positions=malloc((k?k:1)*sizeof(*out->positions));
+        out->substituted=malloc(k?k:1);
+        if (!out->seed || !out->positions || !out->substituted) goto done;
+        for (r=0;r<d && TP_MN(n,deletions,substitutions,r)==
+                         INT16_MAX;++r) {}
+        if (r==d) goto done;
+        out->psi=r;
+        type=llabs((long long)TP_MN(n,deletions,substitutions,r))>=
+             llabs((long long)TP_MX(n,deletions,substitutions,r))?1:2;
+        out->omega=(double)(type==1?
+            TP_MN(n,deletions,substitutions,r):
+            TP_MX(n,deletions,substitutions,r));
+        l=n; h=deletions; e=substitutions; q=k;
+        while (q) {
+            const size_t original=s[l-1],row=(l-1)-h;
+            int16_t best_mn=INT16_MAX,best_mx=INT16_MIN;
+            unsigned min_code=0,max_code=0,code;
+            if (h) {
+                best_mn=TP_MN(l-1,h-1,e,r);
+                best_mx=TP_MX(l-1,h-1,e,r);
+            }
+            for (a=0;a<4;++a) {
+                const size_t changed=a!=original;
+                size_t previous_r,base;
+                int16_t smn,smx,lo,hi,add;
+                unsigned min_type,max_type;
+                if (changed>e) continue;
+                previous_r=subtract_mod(r,t->C[4*row+a],d);
+                smn=TP_MN(l-1,h,e-changed,previous_r);
+                if (smn==INT16_MAX) continue;
+                smx=TP_MX(l-1,h,e-changed,previous_r);
+                base=(row*4+a)*d+r; add=t->signed_A[base];
+                if (t->B1[base]>0) {
+                    lo=(int16_t)(smn+add); hi=(int16_t)(smx+add);
+                    min_type=1; max_type=2;
+                } else {
+                    lo=(int16_t)(-smx+add); hi=(int16_t)(-smn+add);
+                    min_type=2; max_type=1;
+                }
+                if (lo<best_mn) {
+                    best_mn=lo; min_code=min_type+(unsigned)a*2u;
+                }
+                if (hi>best_mx) {
+                    best_mx=hi; max_code=max_type+(unsigned)a*2u;
+                }
+            }
+            if (best_mn!=TP_MN(l,h,e,r) ||
+                best_mx!=TP_MX(l,h,e,r)) goto done;
+            code=type==1?min_code:max_code;
+            if (!code) { --h; --l; continue; }
+            --code; a=code/2u; type=(int)(code%2u)+1;
+            out->seed[q-1]=(uint8_t)a; out->positions[q-1]=l-1;
+            out->substituted[q-1]=(uint8_t)(a!=s[l-1]);
+            if (a!=s[l-1]) --e;
+            r=subtract_mod(r,t->C[4*(q-1)+a],d);
+            --q; --l;
+        }
+    }
+    status=0;
+done:
+    if (status) subseqhash_edit_results_destroy(results,ec);
+    free(snapshots); free(scores); return status;
+#undef TP_MX
+#undef TP_MN
+#undef TP_STATE
 }
 
 int subseqhash_compute_all_edit_splits_i8(

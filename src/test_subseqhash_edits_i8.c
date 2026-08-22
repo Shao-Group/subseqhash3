@@ -11,7 +11,7 @@ int main(void) {
         uint8_t s[7]; size_t i,split;
         SubseqHashI8Tables compact;
         SubseqHashTables reference;
-        SubseqHashEditResult actual[3],legacy[3],expected[3];
+        SubseqHashEditResult actual[3],legacy[3],twopass[3],expected[3];
         for (i=0;i<n;++i) s[i]=(uint8_t)((trial*11+i*3+i*i)%4);
         assert(!subseqhash_i8_tables_init(&compact,n,d,12345+trial));
         assert(!subseqhash_i8_tables_make_double(&compact,&reference));
@@ -19,6 +19,8 @@ int main(void) {
             s,n,edits,&compact,actual));
         assert(!subseqhash_compute_all_edit_splits_i8_legacy(
             s,n,edits,&compact,legacy));
+        assert(!subseqhash_compute_all_edit_splits_i8_twopass(
+            s,n,edits,&compact,twopass));
         assert(!subseqhash_compute_all_edit_splits(
             s,n,edits,&reference,expected));
         for (split=0;split<=edits;++split) {
@@ -39,8 +41,16 @@ int main(void) {
                            k*sizeof(*actual[split].positions)));
             assert(!memcmp(actual[split].substituted,
                            legacy[split].substituted,k));
+            assert(actual[split].psi==twopass[split].psi);
+            assert(actual[split].omega==twopass[split].omega);
+            assert(!memcmp(actual[split].seed,twopass[split].seed,k));
+            assert(!memcmp(actual[split].positions,twopass[split].positions,
+                           k*sizeof(*actual[split].positions)));
+            assert(!memcmp(actual[split].substituted,
+                           twopass[split].substituted,k));
         }
         subseqhash_edit_results_destroy(expected,edits+1);
+        subseqhash_edit_results_destroy(twopass,edits+1);
         subseqhash_edit_results_destroy(legacy,edits+1);
         subseqhash_edit_results_destroy(actual,edits+1);
         subseqhash_tables_destroy(&reference);

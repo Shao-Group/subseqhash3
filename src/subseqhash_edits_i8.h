@@ -32,6 +32,10 @@ int subseqhash_compute_all_edit_splits_i8_legacy(
     const uint8_t *s, size_t n, size_t total_edits,
     const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
 
+int subseqhash_compute_all_edit_splits_i8_twopass(
+    const uint8_t *s, size_t n, size_t total_edits,
+    const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
+
 const char *subseqhash_edits_i8_backend(void);
 
 #endif
