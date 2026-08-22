@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 static double seconds(void) {
@@ -37,39 +38,57 @@ static int encode(const char *text,size_t n,uint8_t *s) {
     return 0;
 }
 
-static char *make_seed_filename(const char *input_filename) {
+static char *make_seed_filename(const char *seed_folder,
+                                const char *input_filename) {
     static const char suffix[]=".i8_twopass_seeds.csv";
-    size_t length=strlen(input_filename);
+    const char *base=strrchr(input_filename,'/');
+    size_t folder_length=strlen(seed_folder),base_length,separator;
     char *name;
-    if (length>SIZE_MAX-sizeof(suffix)) return NULL;
-    name=malloc(length+sizeof(suffix));
+    base=base?base+1:input_filename;
+    base_length=strlen(base);
+    separator=(size_t)(folder_length && seed_folder[folder_length-1]!='/');
+    if (folder_length>SIZE_MAX-separator ||
+        folder_length+separator>SIZE_MAX-base_length ||
+        folder_length+separator+base_length>SIZE_MAX-sizeof(suffix))
+        return NULL;
+    name=malloc(folder_length+separator+base_length+sizeof(suffix));
     if (!name) return NULL;
-    memcpy(name,input_filename,length);
-    memcpy(name+length,suffix,sizeof(suffix));
+    memcpy(name,seed_folder,folder_length);
+    if (separator) name[folder_length]='/';
+    memcpy(name+folder_length+separator,base,base_length);
+    memcpy(name+folder_length+separator+base_length,suffix,sizeof(suffix));
     return name;
 }
 
-static int write_seed_records(FILE *output,size_t repeat,size_t pair,
-                              unsigned side,const char *input,
-                              const SubseqHashEditResult *results,
-                              size_t edits) {
+static int write_pair_seed_records(
+    FILE *output,size_t repeat,size_t pair,const char *input1,
+    const char *input2,const SubseqHashEditResult *left,
+    const SubseqHashEditResult *right,size_t edits) {
     static const char alphabet[4]={'A','C','G','T'};
     size_t split,i;
     for (split=0;split<=edits;++split) {
-        const SubseqHashEditResult *result=results+split;
-        if (fprintf(output,"%zu,%zu,%u,%s,%zu,%zu,%zu,%.0f,",
-                    repeat,pair,side,input,split,edits-split,
-                    result->psi,result->omega)<0) return -1;
-        for (i=0;i<result->length;++i) {
-            if (result->seed[i]>3 ||
-                fputc(alphabet[result->seed[i]],output)==EOF) return -1;
+        const SubseqHashEditResult *a=left+split,*b=right+split;
+        const int same_score=a->psi==b->psi && a->omega==b->omega;
+        const int same_seed=a->length==b->length &&
+            !memcmp(a->seed,b->seed,a->length);
+        if (fprintf(output,"%zu,%zu,%s,%s,%zu,%zu,%zu,%.0f,",
+                    repeat,pair,input1,input2,split,edits-split,
+                    a->psi,a->omega)<0) return -1;
+        for (i=0;i<a->length;++i) {
+            if (a->seed[i]>3 ||
+                fputc(alphabet[a->seed[i]],output)==EOF) return -1;
         }
-        if (fputc('\n',output)==EOF) return -1;
+        if (fprintf(output,",%zu,%.0f,",b->psi,b->omega)<0) return -1;
+        for (i=0;i<b->length;++i) {
+            if (b->seed[i]>3 ||
+                fputc(alphabet[b->seed[i]],output)==EOF) return -1;
+        }
+        if (fprintf(output,",%d,%d\n",same_score,same_seed)<0) return -1;
     }
     return 0;
 }
 
-static int benchmark_file(const char *filename,size_t n,size_t k,size_t d,
+static int benchmark_file(const char *filename,const char *seed_folder,size_t n,size_t k,size_t d,
                           size_t edits,size_t repeats,uint64_t seed_base) {
     const size_t baseline_edits=n-k;
     FILE *input=fopen(filename,"r");
@@ -83,13 +102,13 @@ static int benchmark_file(const char *filename,size_t n,size_t k,size_t d,
     double any_sum=0,all_sum=0,split_sum[32]={0};
     int status=-1;
     if (!input) { perror(filename); return -1; }
-    seed_filename=make_seed_filename(filename);
+    seed_filename=make_seed_filename(seed_folder,filename);
     if (!seed_filename || !(seed_output=fopen(seed_filename,"w"))) {
         if (seed_filename) perror(seed_filename);
         else fputs("seed filename allocation failed\n",stderr);
         goto done;
     }
-    if (fputs("repeat,pair,side,input,Es,Ed,psi,omega,seed\n",
+    if (fputs("repeat,pair,input1,input2,Es,Ed,psi1,omega1,seed1,psi2,omega2,seed2,same_psi_omega,same_seed\n",
               seed_output)==EOF) goto done;
     s1=malloc(n?n:1); s2=malloc(n?n:1);
     if (!s1 || !s2) goto done;
@@ -147,10 +166,8 @@ static int benchmark_file(const char *filename,size_t n,size_t k,size_t d,
                 break;
             }
             edit_time+=seconds()-t0;
-            if (write_seed_records(seed_output,repeat,pairs+1,1,line1,
-                                   left,edits) ||
-                write_seed_records(seed_output,repeat,pairs+1,2,line2,
-                                   right,edits)) {
+            if (write_pair_seed_records(seed_output,repeat,pairs+1,line1,line2,
+                                        left,right,edits)) {
                 fputs("failed writing seed file\n",stderr);
                 subseqhash_edit_results_destroy(right,edits+1);
                 subseqhash_edit_results_destroy(left,edits+1);
@@ -200,15 +217,23 @@ done:
 
 int main(int argc,char **argv) {
     size_t n,k,d,edits,repeats,i;
+    const char *seed_folder;
+    struct stat seed_folder_status;
     uint64_t seed_base=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
     int status=0;
-    if (argc<7 || parse_size(argv[1],&n) || parse_size(argv[2],&k) ||
+    if (argc<8 || parse_size(argv[1],&n) || parse_size(argv[2],&k) ||
         parse_size(argv[3],&d) || parse_size(argv[4],&edits) ||
         parse_size(argv[5],&repeats) || !d || (d&15u) || !repeats ||
         k>n || edits>n || edits>=32 || n-k>=32) {
         fprintf(stderr,
-                "usage: %s n k D edits repeats FILE...  (D %% 16 == 0)\n",
+                "usage: %s n k D edits repeats SEED_FOLDER FILE...  (D %% 16 == 0)\n",
                 argv[0]);
+        return EXIT_FAILURE;
+    }
+    seed_folder=argv[6];
+    if (stat(seed_folder,&seed_folder_status) ||
+        !S_ISDIR(seed_folder_status.st_mode)) {
+        fprintf(stderr,"seed folder is not a directory: %s\n",seed_folder);
         return EXIT_FAILURE;
     }
     fprintf(stderr,"backend: %s\n",subseqhash_edits_i8_backend());
@@ -221,8 +246,9 @@ int main(int argc,char **argv) {
     for (i=0;i<=edits;++i)
         printf(",average_edit_Es%zu_Ed%zu_collisions",i,edits-i);
     putchar('\n');
-    for (i=6;i<(size_t)argc;++i)
-        if (benchmark_file(argv[i],n,k,d,edits,repeats,seed_base)) {
+    for (i=7;i<(size_t)argc;++i)
+        if (benchmark_file(argv[i],seed_folder,n,k,d,edits,repeats,
+                           seed_base)) {
             status=1; break;
         }
     return status?EXIT_FAILURE:EXIT_SUCCESS;
