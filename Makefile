@@ -8,6 +8,7 @@ SRC_DIR := src
 BUILD_DIR := build
 SIMD_BUILD_DIR := build/simd
 SIMD_CFLAGS ?= -O3 -mavx512f -mavx512bw -mavx512vl
+I8_COLLISION_PARALLEL_FLAGS ?= -fopenmp
 TARGET := $(BUILD_DIR)/test_subsequence_scores
 BENCHMARK := $(BUILD_DIR)/benchmark_subsequence_scores
 WITNESS_GENERATOR := $(BUILD_DIR)/generate_witnesses
@@ -207,10 +208,10 @@ $(I16_COLLISION_BENCHMARK): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_ed
 benchmark-i16-collisions: $(I16_COLLISION_BENCHMARK)
 
 $(BUILD_DIR)/benchmark_i8_collisions.o: $(SRC_DIR)/benchmark_i8_collisions.c $(SRC_DIR)/subseqhash_edits_i8.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(I8_COLLISION_PARALLEL_FLAGS) -c $< -o $@
 
 $(I8_COLLISION_BENCHMARK): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_edits_i8.o $(BUILD_DIR)/benchmark_i8_collisions.o
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+	$(CC) $(LDFLAGS) $(I8_COLLISION_PARALLEL_FLAGS) $^ $(LDLIBS) -lm -o $@
 
 benchmark-i8-collisions: $(I8_COLLISION_BENCHMARK)
 

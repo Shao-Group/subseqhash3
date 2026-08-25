@@ -12,6 +12,7 @@
 #define HAVE_AVX512_I8_DP 0
 #endif
 
+
 static uint64_t next_random(uint64_t *state) {
     uint64_t z=(*state+=UINT64_C(0x9e3779b97f4a7c15));
     z=(z^(z>>30))*UINT64_C(0xbf58476d1ce4e5b9);
@@ -460,18 +461,15 @@ static int compute_all_edit_splits_i8_impl(
             for (e=0;e<=max_e;++e) {
                 a=original;
                 {
-                const size_t table_base=(row*4+a)*d;
-                update_shifted(
-                    old_mn+I8_STATE(h,e,0),
-                    old_mx+I8_STATE(h,e,0),
-                    new_mn+I8_STATE(h,e,0),
-                    new_mx+I8_STATE(h,e,0),
-                    t->A+table_base,t->B1+table_base,t->B2+table_base,
-                    t->signed_A+table_base,
-                    t->B1_masks+(row*4+a)*t->blocks,
-                    t->wrap_indices,
-                    parent+I8_PARENT(l,h,e,0),d,
-                    t->C[4*row+a],(unsigned)a,use_aligned);
+                    const size_t table_base=(row*4+a)*d;
+                    update_shifted(old_mn+I8_STATE(h,e,0),
+                        old_mx+I8_STATE(h,e,0),
+                        new_mn+I8_STATE(h,e,0),new_mx+I8_STATE(h,e,0),
+                        t->A+table_base,t->B1+table_base,
+                        t->B2+table_base,t->signed_A+table_base,
+                        t->B1_masks+(row*4+a)*t->blocks,t->wrap_indices,
+                        parent+I8_PARENT(l,h,e,0),d,t->C[4*row+a],
+                        (unsigned)a,use_aligned);
                 }
                 if (e+h<total_edits) {
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
@@ -493,25 +491,22 @@ static int compute_all_edit_splits_i8_impl(
                             old_mx+I8_STATE(h,e,0),
                             new_mn+I8_STATE(h,e+1,0),
                             new_mx+I8_STATE(h,e+1,0),substitution_A,
-                            substitution_masks,
-                            t->wrap_indices,
+                            substitution_masks,t->wrap_indices,
                             parent+I8_PARENT(l,h,e+1,0),d,
                             substitution_shifts,substitution_symbols);
                     } else
 #endif
                     for (a=0;a<4;++a) if (a!=original) {
                         const size_t table_base=(row*4+a)*d;
-                        update_shifted(
-                            old_mn+I8_STATE(h,e,0),
+                        update_shifted(old_mn+I8_STATE(h,e,0),
                             old_mx+I8_STATE(h,e,0),
                             new_mn+I8_STATE(h,e+1,0),
                             new_mx+I8_STATE(h,e+1,0),
                             t->A+table_base,t->B1+table_base,
                             t->B2+table_base,t->signed_A+table_base,
                             t->B1_masks+(row*4+a)*t->blocks,
-                            t->wrap_indices,
-                            parent+I8_PARENT(l,h,e+1,0),d,
-                            t->C[4*row+a],(unsigned)a,use_aligned);
+                            t->wrap_indices,parent+I8_PARENT(l,h,e+1,0),
+                            d,t->C[4*row+a],(unsigned)a,use_aligned);
                     }
                 }
             }

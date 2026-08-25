@@ -106,7 +106,7 @@ static int benchmark_file(const char *filename,const char *seed_filename,
             size_t length1,length2;
             SubseqHashEditResult baseline1[32],baseline2[32];
             SubseqHashEditResult left[32],right[32];
-            double t0; int any=0,all=1;
+            double t0; int any=0,all=1,status1,status2;
             if (read1<0) { run_status=ferror(input)?-1:0; break; }
             read2=getline(&line2,&cap2,input);
             if (read2<0) {
@@ -121,10 +121,24 @@ static int benchmark_file(const char *filename,const char *seed_filename,
             }
 
             t0=seconds();
-            if (subseqhash_compute_all_edit_splits_i8(
-                    s1,n,baseline_edits,&tables,baseline1) ||
-                subseqhash_compute_all_edit_splits_i8(
-                    s2,n,baseline_edits,&tables,baseline2)) {
+#ifdef _OPENMP
+#pragma omp parallel sections num_threads(2)
+            {
+#pragma omp section
+                status1=subseqhash_compute_all_edit_splits_i8(
+                    s1,n,baseline_edits,&tables,baseline1);
+#pragma omp section
+                status2=subseqhash_compute_all_edit_splits_i8(
+                    s2,n,baseline_edits,&tables,baseline2);
+            }
+#else
+            status1=subseqhash_compute_all_edit_splits_i8(
+                s1,n,baseline_edits,&tables,baseline1);
+            status2=subseqhash_compute_all_edit_splits_i8(
+                s2,n,baseline_edits,&tables,baseline2);
+#endif
+            if (status1 || status2) {
+                subseqhash_edit_results_destroy(baseline2,baseline_edits+1);
                 subseqhash_edit_results_destroy(baseline1,baseline_edits+1);
                 break;
             }
@@ -135,10 +149,24 @@ static int benchmark_file(const char *filename,const char *seed_filename,
             subseqhash_edit_results_destroy(baseline1,baseline_edits+1);
 
             t0=seconds();
-            if (subseqhash_compute_all_edit_splits_i8(
-                    s1,n,edits,&tables,left) ||
-                subseqhash_compute_all_edit_splits_i8(
-                    s2,n,edits,&tables,right)) {
+#ifdef _OPENMP
+#pragma omp parallel sections num_threads(2)
+            {
+#pragma omp section
+                status1=subseqhash_compute_all_edit_splits_i8(
+                    s1,n,edits,&tables,left);
+#pragma omp section
+                status2=subseqhash_compute_all_edit_splits_i8(
+                    s2,n,edits,&tables,right);
+            }
+#else
+            status1=subseqhash_compute_all_edit_splits_i8(
+                s1,n,edits,&tables,left);
+            status2=subseqhash_compute_all_edit_splits_i8(
+                s2,n,edits,&tables,right);
+#endif
+            if (status1 || status2) {
+                subseqhash_edit_results_destroy(right,edits+1);
                 subseqhash_edit_results_destroy(left,edits+1);
                 break;
             }
