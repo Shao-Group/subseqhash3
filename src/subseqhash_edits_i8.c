@@ -12,6 +12,9 @@
 #define HAVE_AVX512_I8_DP 0
 #endif
 
+#define I8_POSITIVE_INFINITY INT16_C(32639)
+#define I8_NEGATIVE_INFINITY INT16_C(-32640)
+
 
 static uint64_t next_random(uint64_t *state) {
     uint64_t z=(*state+=UINT64_C(0x9e3779b97f4a7c15));
@@ -36,7 +39,7 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
                                uint64_t seed) {
     static const int8_t b1[4]={1,1,-1,-1},b2[4]={1,-1,1,-1};
     size_t cells,mask_cells,i,r,a,tail,lane;
-    if (!t || !d || k>(size_t)((INT16_MAX-1)/127) ||
+    if (!t || !d || k>(size_t)((I8_POSITIVE_INFINITY-1)/127) ||
         k>SIZE_MAX/d || k*d>SIZE_MAX/4 ||
         k*d*4>SIZE_MAX/sizeof(*t->A)) return -1;
     memset(t,0,sizeof(*t)); t->k=k; t->d=d; t->blocks=(d+31)/32;
@@ -134,7 +137,7 @@ static void update_scalar(const int16_t *src_mn,const int16_t *src_mx,
         size_t q=q0+i,r=r0+i;
         int16_t lo,hi,add;
         unsigned min_type=0,max_type=0;
-        if (src_mn[q]==INT16_MAX) continue;
+        if (src_mn[q]==I8_POSITIVE_INFINITY) continue;
         add=(int16_t)A[r]*(int16_t)B2[r];
         if (B1[r]>0) {
             lo=src_mn[q]+add; hi=src_mx[q]+add;
@@ -212,7 +215,7 @@ static void update_avx512_aligned(
     int16_t *dst_mn,int16_t *dst_mx,const int8_t *signed_A,
     const uint32_t *B1_masks,const uint16_t *wrap_indices,
     uint8_t *decision,size_t d,size_t shift,unsigned symbol) {
-    const __m512i infinity=_mm512_set1_epi16(INT16_MAX);
+    const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
     const __m512i zero=_mm512_setzero_si512();
     size_t r;
     for (r=0;r<d;r+=32) {
@@ -253,7 +256,7 @@ static void update_avx512_substitutions(
     const int8_t *const signed_A[3],const uint32_t *const B1_masks[3],
     const uint16_t *wrap_indices,uint8_t *decision,size_t d,
     const size_t shifts[3],const unsigned symbols[3]) {
-    const __m512i infinity=_mm512_set1_epi16(INT16_MAX);
+    const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
     const __m512i zero=_mm512_setzero_si512();
     const __m256i low_keep=_mm256_set1_epi8((char)0xf0);
     const __m256i high_keep=_mm256_set1_epi8(0x0f);
@@ -321,7 +324,7 @@ static void update_avx512_block(
     const __mmask32 active=count==32?(__mmask32)UINT32_MAX:
         (__mmask32)((1u<<(unsigned)count)-1u);
     (void)B2;
-    const __m512i infinity=_mm512_set1_epi16(INT16_MAX);
+    const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
     __m512i smn=_mm512_maskz_loadu_epi16(active,src_mn+q);
     __m512i smx=_mm512_maskz_loadu_epi16(active,src_mx+q);
     __m512i dmn=_mm512_maskz_loadu_epi16(active,dst_mn+r);
@@ -434,10 +437,10 @@ static int compute_all_edit_splits_i8_impl(
     if (!scores || !parent) goto done;
     old_mn=scores; old_mx=old_mn+band;
     new_mn=old_mx+band; new_mx=new_mn+band;
-    for (q=0;q<band;++q) {
-        old_mn[q]=new_mn[q]=INT16_MAX;
-        old_mx[q]=new_mx[q]=INT16_MIN;
-    }
+    memset(old_mn,0x7f,band*sizeof(*old_mn));
+    memset(new_mn,0x7f,band*sizeof(*new_mn));
+    memset(old_mx,0x80,band*sizeof(*old_mx));
+    memset(new_mx,0x80,band*sizeof(*new_mx));
 #define I8_STATE(H,E,R) (triangular_state(e_count,(H),(E),d)+(R))
 #define I8_PARENT(L,H,E,R) ((((L)-1)*band)+I8_STATE(H,E,R))
     old_mn[0]=old_mx[0]=0;
@@ -446,9 +449,8 @@ static int compute_all_edit_splits_i8_impl(
         const size_t previous_max_h=(l-1)<total_edits?(l-1):total_edits;
         const size_t deletion_h_count=previous_max_h<total_edits?
             previous_max_h+1:total_edits;
-        for (q=0;q<band;++q) {
-            new_mn[q]=INT16_MAX; new_mx[q]=INT16_MIN;
-        }
+        memset(new_mn,0x7f,band*sizeof(*new_mn));
+        memset(new_mx,0x80,band*sizeof(*new_mx));
         for (h=0;h<deletion_h_count;++h)
             for (e=0;e+h+1<=total_edits && e<=(l-1)-h;++e) {
                 size_t src=I8_STATE(h,e,0),dst=I8_STATE(h+1,e,0);
@@ -525,7 +527,7 @@ static int compute_all_edit_splits_i8_impl(
         out->substituted=malloc(k?k:1);
         if (!out->seed || !out->positions || !out->substituted) goto done;
         for (r=0;r<d &&
-             old_mn[I8_STATE(deletions,substitutions,r)]==INT16_MAX;++r) {}
+             old_mn[I8_STATE(deletions,substitutions,r)]==I8_POSITIVE_INFINITY;++r) {}
         if (r==d) goto done;
         out->psi=r;
         type=llabs((long long)old_mn[I8_STATE(deletions,substitutions,r)])>=
@@ -695,8 +697,8 @@ static uint32_t canonical_witness(I8CanonicalContext *c,int type,size_t l,
                 if (previous_type==2) candidate_score=(int16_t)(previous+add);
                 else candidate_score=(int16_t)(-previous+add);
             }
-            if ((previous_type==1 && previous==INT16_MAX) ||
-                (previous_type==2 && previous==INT16_MIN) ||
+            if ((previous_type==1 && previous==I8_POSITIVE_INFINITY) ||
+                (previous_type==2 && previous==I8_NEGATIVE_INFINITY) ||
                 candidate_score!=target) continue;
             prefix=canonical_witness(c,previous_type,l-1,h,e-changed,
                                      previous_r);
@@ -755,10 +757,10 @@ int subseqhash_compute_all_edit_splits_i8_twopass(
     if (!canonical.memo || !canonical.nodes || !canonical.seed_a ||
         !canonical.seed_b || !canonical.positions_a ||
         !canonical.positions_b) goto done;
-    for (q=0;q<band;++q) {
-        old_mn[q]=new_mn[q]=INT16_MAX;
-        old_mx[q]=new_mx[q]=INT16_MIN;
-    }
+    memset(old_mn,0x7f,band*sizeof(*old_mn));
+    memset(new_mn,0x7f,band*sizeof(*new_mn));
+    memset(old_mx,0x80,band*sizeof(*old_mx));
+    memset(new_mx,0x80,band*sizeof(*new_mx));
 #define TP_STATE(H,E,R) ((((H)*ec+(E))*d)+(R))
 #define TP_MN(L,H,E,R) snap_mn[(L)*band+TP_STATE(H,E,R)]
 #define TP_MX(L,H,E,R) snap_mx[(L)*band+TP_STATE(H,E,R)]
@@ -770,9 +772,8 @@ int subseqhash_compute_all_edit_splits_i8_twopass(
         const size_t previous_max_h=(l-1)<total_edits?
             (l-1):total_edits;
         if (original>3) goto done;
-        for (q=0;q<band;++q) {
-            new_mn[q]=INT16_MAX; new_mx[q]=INT16_MIN;
-        }
+        memset(new_mn,0x7f,band*sizeof(*new_mn));
+        memset(new_mx,0x80,band*sizeof(*new_mx));
         for (h=0;h<=previous_max_h && h<total_edits;++h)
             for (e=0;e+h+1<=total_edits;++e) {
                 size_t src=TP_STATE(h,e,0),dst=TP_STATE(h+1,e,0);
@@ -811,7 +812,7 @@ int subseqhash_compute_all_edit_splits_i8_twopass(
         out->substituted=malloc(k?k:1);
         if (!out->seed || !out->positions || !out->substituted) goto done;
         for (r=0;r<d && TP_MN(n,deletions,substitutions,r)==
-                         INT16_MAX;++r) {}
+                         I8_POSITIVE_INFINITY;++r) {}
         if (r==d) goto done;
         out->psi=r;
         type=llabs((long long)TP_MN(n,deletions,substitutions,r))>=

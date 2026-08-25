@@ -106,7 +106,7 @@ static int benchmark_file(const char *filename,const char *seed_filename,
             size_t length1,length2;
             SubseqHashEditResult baseline1[32],baseline2[32];
             SubseqHashEditResult left[32],right[32];
-            double t0; int any=0,all=1,status1,status2;
+            double t0; int any=0,all=1;
             if (read1<0) { run_status=ferror(input)?-1:0; break; }
             read2=getline(&line2,&cap2,input);
             if (read2<0) {
@@ -120,57 +120,42 @@ static int benchmark_file(const char *filename,const char *seed_filename,
                 break;
             }
 
-            t0=seconds();
-#ifdef _OPENMP
-#pragma omp parallel sections num_threads(2)
-            {
-#pragma omp section
-                status1=subseqhash_compute_all_edit_splits_i8(
-                    s1,n,baseline_edits,&tables,baseline1);
-#pragma omp section
-                status2=subseqhash_compute_all_edit_splits_i8(
-                    s2,n,baseline_edits,&tables,baseline2);
+            if (baseline_edits!=edits) {
+                t0=seconds();
+                if (subseqhash_compute_all_edit_splits_i8(
+                        s1,n,baseline_edits,&tables,baseline1) ||
+                    subseqhash_compute_all_edit_splits_i8(
+                        s2,n,baseline_edits,&tables,baseline2)) {
+                    subseqhash_edit_results_destroy(
+                        baseline1,baseline_edits+1);
+                    break;
+                }
+                baseline_time+=seconds()-t0;
+                baseline_collisions+=(size_t)!memcmp(
+                    baseline1[0].seed,baseline2[0].seed,k);
+                subseqhash_edit_results_destroy(
+                    baseline2,baseline_edits+1);
+                subseqhash_edit_results_destroy(
+                    baseline1,baseline_edits+1);
             }
-#else
-            status1=subseqhash_compute_all_edit_splits_i8(
-                s1,n,baseline_edits,&tables,baseline1);
-            status2=subseqhash_compute_all_edit_splits_i8(
-                s2,n,baseline_edits,&tables,baseline2);
-#endif
-            if (status1 || status2) {
-                subseqhash_edit_results_destroy(baseline2,baseline_edits+1);
-                subseqhash_edit_results_destroy(baseline1,baseline_edits+1);
-                break;
-            }
-            baseline_time+=seconds()-t0;
-            baseline_collisions+=(size_t)!memcmp(
-                baseline1[0].seed,baseline2[0].seed,k);
-            subseqhash_edit_results_destroy(baseline2,baseline_edits+1);
-            subseqhash_edit_results_destroy(baseline1,baseline_edits+1);
 
             t0=seconds();
-#ifdef _OPENMP
-#pragma omp parallel sections num_threads(2)
-            {
-#pragma omp section
-                status1=subseqhash_compute_all_edit_splits_i8(
-                    s1,n,edits,&tables,left);
-#pragma omp section
-                status2=subseqhash_compute_all_edit_splits_i8(
-                    s2,n,edits,&tables,right);
-            }
-#else
-            status1=subseqhash_compute_all_edit_splits_i8(
-                s1,n,edits,&tables,left);
-            status2=subseqhash_compute_all_edit_splits_i8(
-                s2,n,edits,&tables,right);
-#endif
-            if (status1 || status2) {
-                subseqhash_edit_results_destroy(right,edits+1);
+            if (subseqhash_compute_all_edit_splits_i8(
+                    s1,n,edits,&tables,left) ||
+                subseqhash_compute_all_edit_splits_i8(
+                    s2,n,edits,&tables,right)) {
                 subseqhash_edit_results_destroy(left,edits+1);
                 break;
             }
-            edit_time+=seconds()-t0;
+            {
+                const double elapsed=seconds()-t0;
+                edit_time+=elapsed;
+                if (baseline_edits==edits) {
+                    baseline_time+=elapsed;
+                    baseline_collisions+=(size_t)!memcmp(
+                        left[0].seed,right[0].seed,k);
+                }
+            }
             if (seed_output &&
                 write_pair_seed_records(seed_output,repeat,pairs+1,line1,line2,
                                         left,right,edits)) {
