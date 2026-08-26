@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200112L
 #include "subseqhash_edits_i8.h"
 
 #include <limits.h>
@@ -15,6 +16,11 @@
 #define I8_POSITIVE_INFINITY INT16_C(32639)
 #define I8_NEGATIVE_INFINITY INT16_C(-32640)
 
+static void *aligned_allocate(size_t alignment,size_t bytes) {
+    void *pointer=NULL;
+    if (posix_memalign(&pointer,alignment,bytes?bytes:alignment)) return NULL;
+    return pointer;
+}
 
 static uint64_t next_random(uint64_t *state) {
     uint64_t z=(*state+=UINT64_C(0x9e3779b97f4a7c15));
@@ -48,7 +54,7 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
     mask_cells=k*4*t->blocks;
     t->A=malloc((cells?cells:1)*sizeof(*t->A));
     t->B1=malloc(cells?cells:1); t->B2=malloc(cells?cells:1);
-    t->signed_A=malloc((cells?cells:1)*sizeof(*t->signed_A));
+    t->signed_A=aligned_allocate(64,(cells?cells:1)*sizeof(*t->signed_A));
     t->B1_masks=calloc(mask_cells?mask_cells:1,sizeof(*t->B1_masks));
     t->wrap_indices=malloc(32*32*sizeof(*t->wrap_indices));
     t->C=malloc((k?k*4:1)*sizeof(*t->C));
@@ -341,6 +347,76 @@ static void update_avx512_substitutions(
         _mm256_storeu_si256((__m256i *)(decision+r),parent);
     }
 }
+
+static void update_avx512_destination(
+    const int16_t *const src_mn[4],const int16_t *const src_mx[4],
+    int16_t *dst_mn,int16_t *dst_mx,
+    const int8_t *const signed_A[4],const uint32_t *const B1_masks[4],
+    const uint16_t *wrap_indices,uint8_t *decision,size_t d,
+    const size_t shifts[4],const unsigned symbols[4],unsigned count,
+    const int16_t *initial_mn,const int16_t *initial_mx) {
+    const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
+    const __m512i negative_infinity=
+        _mm512_set1_epi16(I8_NEGATIVE_INFINITY);
+    const __m512i zero=_mm512_setzero_si512();
+    const __m256i low_keep=_mm256_set1_epi8((char)0xf0);
+    const __m256i high_keep=_mm256_set1_epi8(0x0f);
+    size_t r;
+    for (r=0;r<d;r+=32) {
+        __m512i dmn=initial_mn?
+            _mm512_load_si512((const void *)(initial_mn+r)):infinity;
+        __m512i dmx=initial_mx?
+            _mm512_load_si512((const void *)(initial_mx+r)):
+            negative_infinity;
+        __m256i parent=_mm256_setzero_si256();
+        unsigned candidate;
+#pragma GCC unroll 4
+        for (candidate=0;candidate<count;++candidate) {
+            const size_t shift=shifts[candidate];
+            const size_t q=r>=shift?r-shift:r+d-shift;
+            const __m512i smn=load_wrapped_i16(
+                src_mn[candidate],d,q,wrap_indices);
+            const __m512i smx=load_wrapped_i16(
+                src_mx[candidate],d,q,wrap_indices);
+            const __m256i a8=_mm256_load_si256(
+                (const __m256i *)(signed_A[candidate]+r));
+            const __m512i add=_mm512_cvtepi8_epi16(a8);
+            const __mmask32 positive=(__mmask32)
+                B1_masks[candidate][r/32];
+            const __mmask32 reachable=
+                _mm512_cmpneq_epi16_mask(smn,infinity);
+            const __m512i lo=_mm512_add_epi16(
+                _mm512_mask_blend_epi16(positive,
+                    _mm512_sub_epi16(zero,smx),smn),add);
+            const __m512i hi=_mm512_add_epi16(
+                _mm512_mask_blend_epi16(positive,
+                    _mm512_sub_epi16(zero,smn),smx),add);
+            const __mmask32 minmask=reachable&
+                _mm512_cmplt_epi16_mask(lo,dmn);
+            const __mmask32 maxmask=reachable&
+                _mm512_cmpgt_epi16_mask(hi,dmx);
+            const unsigned base=symbols[candidate]*2u;
+            __m256i code=_mm256_mask_blend_epi8(
+                positive,_mm256_set1_epi8((char)(base+2u)),
+                _mm256_set1_epi8((char)(base+1u)));
+            __m256i updated=_mm256_or_si256(
+                _mm256_and_si256(parent,low_keep),code);
+            parent=_mm256_mask_mov_epi8(parent,minmask,updated);
+            code=_mm256_mask_blend_epi8(
+                positive,_mm256_set1_epi8((char)(base+1u)),
+                _mm256_set1_epi8((char)(base+2u)));
+            code=_mm256_slli_epi16(code,4);
+            updated=_mm256_or_si256(
+                _mm256_and_si256(parent,high_keep),code);
+            parent=_mm256_mask_mov_epi8(parent,maxmask,updated);
+            dmn=_mm512_mask_mov_epi16(dmn,minmask,lo);
+            dmx=_mm512_mask_mov_epi16(dmx,maxmask,hi);
+        }
+        _mm512_store_si512((void *)(dst_mn+r),dmn);
+        _mm512_store_si512((void *)(dst_mx+r),dmx);
+        _mm256_store_si256((__m256i *)(decision+r),parent);
+    }
+}
 #endif
 
 static void update_avx512_block(
@@ -460,9 +536,10 @@ static int compute_all_edit_splits_i8_impl(
     parent_states=n*band;
     memset(results,0,e_count*sizeof(*results));
     for (l=0;l<n;++l) if (s[l]>3) return -1;
-    scores=malloc(4*band*sizeof(*scores));
-    parent=calloc(parent_states?parent_states:1,1);
+    scores=aligned_allocate(64,4*band*sizeof(*scores));
+    parent=aligned_allocate(64,parent_states?parent_states:1);
     if (!scores || !parent) goto done;
+    memset(parent,0,parent_states?parent_states:1);
     old_mn=scores; old_mx=old_mn+band;
     new_mn=old_mx+band; new_mx=new_mn+band;
     /* At layer zero only (h,e)=(0,0) is reachable.  Every other state is
@@ -479,66 +556,86 @@ static int compute_all_edit_splits_i8_impl(
             previous_max_h+1:total_edits;
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
         if (use_aligned && !(d&31u)) {
-            /* Build each destination directly from its deletion predecessor.
-               This avoids writing the copied state and immediately loading it
-               again in the first transition.  Candidate order is unchanged:
-               original(e), substitutions(e+1), original(e+1), ... */
-            for (h=0;h<=previous_max_h;++h) {
-                const size_t row=(l-1)-h;
-                const size_t max_e=row<total_edits-h?
-                    row:total_edits-h;
-                for (e=0;e<=max_e;++e) {
-                    const size_t table_base=(row*4+original)*d;
-                    const int initialize=(e==0);
-                    const int16_t *initial_mn=initialize&&h?
-                        old_mn+I8_STATE(h-1,e,0):NULL;
-                    const int16_t *initial_mx=initialize&&h?
-                        old_mx+I8_STATE(h-1,e,0):NULL;
-                    update_avx512_aligned(
-                        old_mn+I8_STATE(h,e,0),
-                        old_mx+I8_STATE(h,e,0),
-                        new_mn+I8_STATE(h,e,0),
-                        new_mx+I8_STATE(h,e,0),
-                        t->signed_A+table_base,
-                        t->B1_masks+(row*4+original)*t->blocks,
-                        t->wrap_indices,parent+I8_PARENT(l,h,e,0),d,
-                        t->C[4*row+original],(unsigned)original,
-                        initial_mn,initial_mx,initialize);
-                    if (e+h<total_edits) {
-                        const int8_t *substitution_A[3];
-                        const uint32_t *substitution_masks[3];
-                        size_t substitution_shifts[3];
-                        unsigned substitution_symbols[3],index=0;
-                        const int16_t *deletion_mn=h?
-                            old_mn+I8_STATE(h-1,e+1,0):NULL;
-                        const int16_t *deletion_mx=h?
-                            old_mx+I8_STATE(h-1,e+1,0):NULL;
-                        for (a=0;a<4;++a) if (a!=original) {
-                            const size_t base=(row*4+a)*d;
-                            substitution_A[index]=t->signed_A+base;
-                            substitution_masks[index]=t->B1_masks+
-                                (row*4+a)*t->blocks;
-                            substitution_shifts[index]=t->C[4*row+a];
-                            substitution_symbols[index++]=(unsigned)a;
-                        }
-                        update_avx512_substitutions(
-                            old_mn+I8_STATE(h,e,0),
-                            old_mx+I8_STATE(h,e,0),
-                            new_mn+I8_STATE(h,e+1,0),
-                            new_mx+I8_STATE(h,e+1,0),substitution_A,
-                            substitution_masks,t->wrap_indices,
-                            parent+I8_PARENT(l,h,e+1,0),d,
-                            substitution_shifts,substitution_symbols,
-                            deletion_mn,deletion_mx,1);
-                    }
+            /* Visit each destination once.  Substitution candidates precede
+               the original-symbol candidate exactly as in the source-centric
+               traversal, preserving strict-comparison tie breaking. */
+            const size_t max_h=l<total_edits?l:total_edits;
+            for (h=0;h<=max_h;++h) {
+                const size_t retained=l-h;
+                const size_t max_e=retained<total_edits-h?
+                    retained:total_edits-h;
+                if (!retained) {
+                    const size_t src=I8_STATE(h-1,0,0);
+                    const size_t dst=I8_STATE(h,0,0);
+                    memcpy(new_mn+dst,old_mn+src,d*sizeof(*new_mn));
+                    memcpy(new_mx+dst,old_mx+src,d*sizeof(*new_mx));
+                    continue;
                 }
-            }
-            if (previous_max_h<total_edits) {
-                const size_t new_h=previous_max_h+1;
-                const size_t src=I8_STATE(previous_max_h,0,0);
-                const size_t dst=I8_STATE(new_h,0,0);
-                memcpy(new_mn+dst,old_mn+src,d*sizeof(*new_mn));
-                memcpy(new_mx+dst,old_mx+src,d*sizeof(*new_mx));
+                {
+                const size_t row=retained-1;
+                const int8_t *substitution_A[3];
+                const uint32_t *substitution_masks[3];
+                size_t substitution_shifts[3];
+                unsigned substitution_symbols[3],substitution_count=0;
+                const size_t original_base=(row*4+original)*d;
+                for (a=0;a<4;++a) if (a!=original) {
+                    const size_t base=(row*4+a)*d;
+                    substitution_A[substitution_count]=t->signed_A+base;
+                    substitution_masks[substitution_count]=t->B1_masks+
+                        (row*4+a)*t->blocks;
+                    substitution_shifts[substitution_count]=t->C[4*row+a];
+                    substitution_symbols[substitution_count++]=(unsigned)a;
+                }
+                for (e=0;e<=max_e;++e) {
+                    const int16_t *candidate_mn[4],*candidate_mx[4];
+                    const int8_t *candidate_A[4];
+                    const uint32_t *candidate_masks[4];
+                    size_t candidate_shifts[4];
+                    unsigned candidate_symbols[4],count=0;
+                    const int16_t *initial_mn=h?
+                        old_mn+I8_STATE(h-1,e,0):NULL;
+                    const int16_t *initial_mx=h?
+                        old_mx+I8_STATE(h-1,e,0):NULL;
+                    if (e) for (a=0;a<3;++a) {
+                        candidate_mn[count]=old_mn+I8_STATE(h,e-1,0);
+                        candidate_mx[count]=old_mx+I8_STATE(h,e-1,0);
+                        candidate_A[count]=substitution_A[a];
+                        candidate_masks[count]=substitution_masks[a];
+                        candidate_shifts[count]=substitution_shifts[a];
+                        candidate_symbols[count++]=substitution_symbols[a];
+                    }
+                    if (e<=row) {
+                        candidate_mn[count]=old_mn+I8_STATE(h,e,0);
+                        candidate_mx[count]=old_mx+I8_STATE(h,e,0);
+                        candidate_A[count]=t->signed_A+original_base;
+                        candidate_masks[count]=t->B1_masks+
+                            (row*4+original)*t->blocks;
+                        candidate_shifts[count]=t->C[4*row+original];
+                        candidate_symbols[count++]=(unsigned)original;
+                    }
+                    if (count==4)
+                        update_avx512_destination(candidate_mn,candidate_mx,
+                            new_mn+I8_STATE(h,e,0),
+                            new_mx+I8_STATE(h,e,0),candidate_A,
+                            candidate_masks,t->wrap_indices,
+                            parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
+                            candidate_symbols,4,initial_mn,initial_mx);
+                    else if (count==3)
+                        update_avx512_destination(candidate_mn,candidate_mx,
+                            new_mn+I8_STATE(h,e,0),
+                            new_mx+I8_STATE(h,e,0),candidate_A,
+                            candidate_masks,t->wrap_indices,
+                            parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
+                            candidate_symbols,3,initial_mn,initial_mx);
+                    else
+                        update_avx512_destination(candidate_mn,candidate_mx,
+                            new_mn+I8_STATE(h,e,0),
+                            new_mx+I8_STATE(h,e,0),candidate_A,
+                            candidate_masks,t->wrap_indices,
+                            parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
+                            candidate_symbols,1,initial_mn,initial_mx);
+                }
+                }
             }
             goto layer_complete;
         }
