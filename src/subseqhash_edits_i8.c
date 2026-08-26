@@ -437,10 +437,10 @@ static int compute_all_edit_splits_i8_impl(
     if (!scores || !parent) goto done;
     old_mn=scores; old_mx=old_mn+band;
     new_mn=old_mx+band; new_mx=new_mn+band;
-    memset(old_mn,0x7f,band*sizeof(*old_mn));
-    memset(new_mn,0x7f,band*sizeof(*new_mn));
-    memset(old_mx,0x80,band*sizeof(*old_mx));
-    memset(new_mx,0x80,band*sizeof(*new_mx));
+    /* At layer zero only (h,e)=(0,0) is reachable.  Every other state is
+       initialized immediately before the first layer that can reach it. */
+    memset(old_mn,0x7f,d*sizeof(*old_mn));
+    memset(old_mx,0x80,d*sizeof(*old_mx));
 #define I8_STATE(H,E,R) (triangular_state(e_count,(H),(E),d)+(R))
 #define I8_PARENT(L,H,E,R) ((((L)-1)*band)+I8_STATE(H,E,R))
     old_mn[0]=old_mx[0]=0;
@@ -449,8 +449,15 @@ static int compute_all_edit_splits_i8_impl(
         const size_t previous_max_h=(l-1)<total_edits?(l-1):total_edits;
         const size_t deletion_h_count=previous_max_h<total_edits?
             previous_max_h+1:total_edits;
-        memset(new_mn,0x7f,band*sizeof(*new_mn));
-        memset(new_mx,0x80,band*sizeof(*new_mx));
+        /* Every reachable h>0 destination is initialized below by copying
+           its mandatory deletion predecessor.  Only h=0 lacks such a
+           predecessor and needs an infinity fill before its transitions. */
+        {
+            const size_t reachable_e=l<total_edits?l:total_edits;
+            const size_t cells=(reachable_e+1)*d;
+            memset(new_mn,0x7f,cells*sizeof(*new_mn));
+            memset(new_mx,0x80,cells*sizeof(*new_mx));
+        }
         for (h=0;h<deletion_h_count;++h)
             for (e=0;e+h+1<=total_edits && e<=(l-1)-h;++e) {
                 size_t src=I8_STATE(h,e,0),dst=I8_STATE(h+1,e,0);
