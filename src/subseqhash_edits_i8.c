@@ -214,8 +214,12 @@ static void update_avx512_aligned(
     const int16_t *src_mn,const int16_t *src_mx,
     int16_t *dst_mn,int16_t *dst_mx,const int8_t *signed_A,
     const uint32_t *B1_masks,const uint16_t *wrap_indices,
-    uint8_t *decision,size_t d,size_t shift,unsigned symbol) {
+    uint8_t *decision,size_t d,size_t shift,unsigned symbol,
+    const int16_t *initial_mn,const int16_t *initial_mx,
+    int initialize) {
     const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
+    const __m512i negative_infinity=
+        _mm512_set1_epi16(I8_NEGATIVE_INFINITY);
     const __m512i zero=_mm512_setzero_si512();
     size_t r;
     for (r=0;r<d;r+=32) {
@@ -224,8 +228,14 @@ static void update_avx512_aligned(
             src_mn,d,q,wrap_indices);
         const __m512i smx=load_wrapped_i16(
             src_mx,d,q,wrap_indices);
-        const __m512i dmn=_mm512_loadu_si512((const void *)(dst_mn+r));
-        const __m512i dmx=_mm512_loadu_si512((const void *)(dst_mx+r));
+        const __m512i dmn=initialize?
+            (initial_mn?_mm512_loadu_si512((const void *)(initial_mn+r)):
+                        infinity):
+            _mm512_loadu_si512((const void *)(dst_mn+r));
+        const __m512i dmx=initialize?
+            (initial_mx?_mm512_loadu_si512((const void *)(initial_mx+r)):
+                        negative_infinity):
+            _mm512_loadu_si512((const void *)(dst_mx+r));
         const __m256i a8=_mm256_loadu_si256(
             (const __m256i *)(signed_A+r));
         const __m512i add=_mm512_cvtepi8_epi16(a8);
@@ -242,8 +252,15 @@ static void update_avx512_aligned(
             _mm512_cmplt_epi16_mask(lo,dmn);
         const __mmask32 maxmask=reachable&
             _mm512_cmpgt_epi16_mask(hi,dmx);
-        _mm512_mask_storeu_epi16(dst_mn+r,minmask,lo);
-        _mm512_mask_storeu_epi16(dst_mx+r,maxmask,hi);
+        if (initialize) {
+            _mm512_storeu_si512((void *)(dst_mn+r),
+                _mm512_mask_mov_epi16(dmn,minmask,lo));
+            _mm512_storeu_si512((void *)(dst_mx+r),
+                _mm512_mask_mov_epi16(dmx,maxmask,hi));
+        } else {
+            _mm512_mask_storeu_epi16(dst_mn+r,minmask,lo);
+            _mm512_mask_storeu_epi16(dst_mx+r,maxmask,hi);
+        }
         if (decision && (minmask || maxmask))
             update_parent_vector(decision,r,(__mmask32)UINT32_MAX,
                                  positive,minmask,maxmask,symbol);
@@ -255,15 +272,25 @@ static void update_avx512_substitutions(
     int16_t *dst_mn,int16_t *dst_mx,
     const int8_t *const signed_A[3],const uint32_t *const B1_masks[3],
     const uint16_t *wrap_indices,uint8_t *decision,size_t d,
-    const size_t shifts[3],const unsigned symbols[3]) {
+    const size_t shifts[3],const unsigned symbols[3],
+    const int16_t *initial_mn,const int16_t *initial_mx,
+    int initialize) {
     const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
+    const __m512i negative_infinity=
+        _mm512_set1_epi16(I8_NEGATIVE_INFINITY);
     const __m512i zero=_mm512_setzero_si512();
     const __m256i low_keep=_mm256_set1_epi8((char)0xf0);
     const __m256i high_keep=_mm256_set1_epi8(0x0f);
     size_t r;
     for (r=0;r<d;r+=32) {
-        __m512i dmn=_mm512_loadu_si512((const void *)(dst_mn+r));
-        __m512i dmx=_mm512_loadu_si512((const void *)(dst_mx+r));
+        __m512i dmn=initialize?
+            (initial_mn?_mm512_loadu_si512((const void *)(initial_mn+r)):
+                        infinity):
+            _mm512_loadu_si512((const void *)(dst_mn+r));
+        __m512i dmx=initialize?
+            (initial_mx?_mm512_loadu_si512((const void *)(initial_mx+r)):
+                        negative_infinity):
+            _mm512_loadu_si512((const void *)(dst_mx+r));
         __m256i parent=_mm256_loadu_si256(
             (const __m256i *)(decision+r));
         unsigned candidate;
@@ -394,7 +421,8 @@ static void update_shifted(const int16_t *src_mn,const int16_t *src_mx,
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
     if (use_aligned && !(d&31u)) {
         update_avx512_aligned(src_mn,src_mx,dst_mn,dst_mx,signed_A,
-                              B1_masks,wrap_indices,decision,d,shift,symbol);
+                              B1_masks,wrap_indices,decision,d,shift,symbol,
+                              NULL,NULL,0);
         return;
     }
 #endif
@@ -449,6 +477,72 @@ static int compute_all_edit_splits_i8_impl(
         const size_t previous_max_h=(l-1)<total_edits?(l-1):total_edits;
         const size_t deletion_h_count=previous_max_h<total_edits?
             previous_max_h+1:total_edits;
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+        if (use_aligned && !(d&31u)) {
+            /* Build each destination directly from its deletion predecessor.
+               This avoids writing the copied state and immediately loading it
+               again in the first transition.  Candidate order is unchanged:
+               original(e), substitutions(e+1), original(e+1), ... */
+            for (h=0;h<=previous_max_h;++h) {
+                const size_t row=(l-1)-h;
+                const size_t max_e=row<total_edits-h?
+                    row:total_edits-h;
+                for (e=0;e<=max_e;++e) {
+                    const size_t table_base=(row*4+original)*d;
+                    const int initialize=(e==0);
+                    const int16_t *initial_mn=initialize&&h?
+                        old_mn+I8_STATE(h-1,e,0):NULL;
+                    const int16_t *initial_mx=initialize&&h?
+                        old_mx+I8_STATE(h-1,e,0):NULL;
+                    update_avx512_aligned(
+                        old_mn+I8_STATE(h,e,0),
+                        old_mx+I8_STATE(h,e,0),
+                        new_mn+I8_STATE(h,e,0),
+                        new_mx+I8_STATE(h,e,0),
+                        t->signed_A+table_base,
+                        t->B1_masks+(row*4+original)*t->blocks,
+                        t->wrap_indices,parent+I8_PARENT(l,h,e,0),d,
+                        t->C[4*row+original],(unsigned)original,
+                        initial_mn,initial_mx,initialize);
+                    if (e+h<total_edits) {
+                        const int8_t *substitution_A[3];
+                        const uint32_t *substitution_masks[3];
+                        size_t substitution_shifts[3];
+                        unsigned substitution_symbols[3],index=0;
+                        const int16_t *deletion_mn=h?
+                            old_mn+I8_STATE(h-1,e+1,0):NULL;
+                        const int16_t *deletion_mx=h?
+                            old_mx+I8_STATE(h-1,e+1,0):NULL;
+                        for (a=0;a<4;++a) if (a!=original) {
+                            const size_t base=(row*4+a)*d;
+                            substitution_A[index]=t->signed_A+base;
+                            substitution_masks[index]=t->B1_masks+
+                                (row*4+a)*t->blocks;
+                            substitution_shifts[index]=t->C[4*row+a];
+                            substitution_symbols[index++]=(unsigned)a;
+                        }
+                        update_avx512_substitutions(
+                            old_mn+I8_STATE(h,e,0),
+                            old_mx+I8_STATE(h,e,0),
+                            new_mn+I8_STATE(h,e+1,0),
+                            new_mx+I8_STATE(h,e+1,0),substitution_A,
+                            substitution_masks,t->wrap_indices,
+                            parent+I8_PARENT(l,h,e+1,0),d,
+                            substitution_shifts,substitution_symbols,
+                            deletion_mn,deletion_mx,1);
+                    }
+                }
+            }
+            if (previous_max_h<total_edits) {
+                const size_t new_h=previous_max_h+1;
+                const size_t src=I8_STATE(previous_max_h,0,0);
+                const size_t dst=I8_STATE(new_h,0,0);
+                memcpy(new_mn+dst,old_mn+src,d*sizeof(*new_mn));
+                memcpy(new_mx+dst,old_mx+src,d*sizeof(*new_mx));
+            }
+            goto layer_complete;
+        }
+#endif
         /* Every reachable h>0 destination is initialized below by copying
            its mandatory deletion predecessor.  Only h=0 lacks such a
            predecessor and needs an infinity fill before its transitions. */
@@ -502,7 +596,8 @@ static int compute_all_edit_splits_i8_impl(
                             new_mx+I8_STATE(h,e+1,0),substitution_A,
                             substitution_masks,t->wrap_indices,
                             parent+I8_PARENT(l,h,e+1,0),d,
-                            substitution_shifts,substitution_symbols);
+                            substitution_shifts,substitution_symbols,
+                            NULL,NULL,0);
                     } else
 #endif
                     for (a=0;a<4;++a) if (a!=original) {
@@ -520,6 +615,9 @@ static int compute_all_edit_splits_i8_impl(
                 }
             }
         }
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+layer_complete:
+#endif
         { int16_t *tmp=old_mn; old_mn=new_mn; new_mn=tmp;
           tmp=old_mx; old_mx=new_mx; new_mx=tmp; }
     }
