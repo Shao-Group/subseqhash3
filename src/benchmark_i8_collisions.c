@@ -7,9 +7,9 @@
 #include <string.h>
 #include <time.h>
 
-static double seconds(void) {
+static double seconds(clockid_t clock_id) {
     struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC,&t);
+    clock_gettime(clock_id,&t);
     return (double)t.tv_sec+(double)t.tv_nsec*1e-9;
 }
 static int parse_size(const char *text,size_t *value) {
@@ -74,8 +74,8 @@ static int benchmark_file(const char *filename,const char *seed_filename,
     char *line1=NULL,*line2=NULL;
     size_t cap1=0,cap2=0,repeat,split;
     uint8_t *s1=NULL,*s2=NULL;
-    double pairs_sum=0,baseline_time_sum=0,baseline_rate_sum=0;
-    double baseline_collisions_sum=0,edit_time_sum=0,edit_rate_sum=0;
+    double pairs_sum=0,wall_time_sum=0,cpu_time_sum=0;
+    double baseline_collisions_sum=0;
     double any_sum=0,all_sum=0,split_sum[32]={0};
     int status=-1;
     if (!input) { perror(filename); return -1; }
@@ -94,7 +94,8 @@ static int benchmark_file(const char *filename,const char *seed_filename,
         SubseqHashI8Tables tables={0};
         size_t pairs=0,baseline_collisions=0,any_collisions=0;
         size_t all_collisions=0,split_collisions[32]={0};
-        double baseline_time=0,edit_time=0;
+        const double wall_start=seconds(CLOCK_MONOTONIC);
+        const double cpu_start=seconds(CLOCK_PROCESS_CPUTIME_ID);
         int run_status=-1;
         if (subseqhash_i8_tables_init(
                 &tables,n,d,
@@ -106,7 +107,7 @@ static int benchmark_file(const char *filename,const char *seed_filename,
             size_t length1,length2;
             SubseqHashEditResult baseline1[32],baseline2[32];
             SubseqHashEditResult left[32],right[32];
-            double t0; int any=0,all=1;
+            int any=0,all=1;
             if (read1<0) { run_status=ferror(input)?-1:0; break; }
             read2=getline(&line2,&cap2,input);
             if (read2<0) {
@@ -121,7 +122,6 @@ static int benchmark_file(const char *filename,const char *seed_filename,
             }
 
             if (baseline_edits!=edits) {
-                t0=seconds();
                 if (subseqhash_compute_all_edit_splits_i8(
                         s1,n,baseline_edits,&tables,baseline1) ||
                     subseqhash_compute_all_edit_splits_i8(
@@ -130,7 +130,6 @@ static int benchmark_file(const char *filename,const char *seed_filename,
                         baseline1,baseline_edits+1);
                     break;
                 }
-                baseline_time+=seconds()-t0;
                 baseline_collisions+=(size_t)!memcmp(
                     baseline1[0].seed,baseline2[0].seed,k);
                 subseqhash_edit_results_destroy(
@@ -139,7 +138,6 @@ static int benchmark_file(const char *filename,const char *seed_filename,
                     baseline1,baseline_edits+1);
             }
 
-            t0=seconds();
             if (subseqhash_compute_all_edit_splits_i8(
                     s1,n,edits,&tables,left) ||
                 subseqhash_compute_all_edit_splits_i8(
@@ -147,14 +145,9 @@ static int benchmark_file(const char *filename,const char *seed_filename,
                 subseqhash_edit_results_destroy(left,edits+1);
                 break;
             }
-            {
-                const double elapsed=seconds()-t0;
-                edit_time+=elapsed;
-                if (baseline_edits==edits) {
-                    baseline_time+=elapsed;
-                    baseline_collisions+=(size_t)!memcmp(
-                        left[0].seed,right[0].seed,k);
-                }
+            if (baseline_edits==edits) {
+                baseline_collisions+=(size_t)!memcmp(
+                    left[0].seed,right[0].seed,k);
             }
             if (seed_output &&
                 write_pair_seed_records(seed_output,repeat,pairs+1,line1,line2,
@@ -179,11 +172,10 @@ static int benchmark_file(const char *filename,const char *seed_filename,
         }
         subseqhash_i8_tables_destroy(&tables);
         if (run_status) goto done;
-        pairs_sum+=pairs; baseline_time_sum+=baseline_time;
-        baseline_rate_sum+=baseline_time?(double)pairs/baseline_time:0;
+        wall_time_sum+=seconds(CLOCK_MONOTONIC)-wall_start;
+        cpu_time_sum+=seconds(CLOCK_PROCESS_CPUTIME_ID)-cpu_start;
+        pairs_sum+=pairs;
         baseline_collisions_sum+=baseline_collisions;
-        edit_time_sum+=edit_time;
-        edit_rate_sum+=edit_time?(double)pairs/edit_time:0;
         any_sum+=any_collisions; all_sum+=all_collisions;
         for (split=0;split<=edits;++split)
             split_sum[split]+=split_collisions[split];
@@ -193,10 +185,12 @@ static int benchmark_file(const char *filename,const char *seed_filename,
         fprintf(stderr,"seed file: %s\n",seed_filename);
     }
     status=0;
-    printf("%s,%zu,%.3f,%.6f,%.3f,%.3f,%.6f,%.3f,%.3f,%.3f",
-           filename,repeats,pairs_sum/repeats,baseline_time_sum/repeats,
-           baseline_rate_sum/repeats,baseline_collisions_sum/repeats,
-           edit_time_sum/repeats,edit_rate_sum/repeats,
+    printf("%s,%zu,%.3f,%.6f,%.6f,%.3f,%.3f,%.3f,%.3f,%.3f",
+           filename,repeats,pairs_sum/repeats,wall_time_sum/repeats,
+           cpu_time_sum/repeats,
+           wall_time_sum?pairs_sum/wall_time_sum:0,
+           cpu_time_sum?pairs_sum/cpu_time_sum:0,
+           baseline_collisions_sum/repeats,
            any_sum/repeats,all_sum/repeats);
     for (split=0;split<=edits;++split)
         printf(",%.3f",split_sum[split]/repeats);
@@ -221,12 +215,11 @@ int main(int argc,char **argv) {
         return EXIT_FAILURE;
     }
     fprintf(stderr,"backend: %s\n",subseqhash_edits_i8_backend());
-    printf("file,repeats,average_pairs,average_i8_k%zu_seconds,"
-           "average_i8_k%zu_pairs_per_second,"
-           "average_i8_k%zu_collisions,average_i8_edits_seconds,"
-           "average_i8_edits_pairs_per_second,"
+    printf("file,repeats,average_pairs,average_wall_seconds,"
+           "average_cpu_seconds,average_pairs_per_wall_second,"
+           "average_pairs_per_cpu_second,average_i8_k%zu_collisions,"
            "average_edit_any_seed_collisions,"
-           "average_edit_all_seeds_collisions",k,k,k);
+           "average_edit_all_seeds_collisions",k);
     for (i=0;i<=edits;++i)
         printf(",average_edit_Es%zu_Ed%zu_collisions",i,edits-i);
     putchar('\n');
