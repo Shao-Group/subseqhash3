@@ -15,6 +15,7 @@
 
 #define I8_POSITIVE_INFINITY INT16_C(32639)
 #define I8_NEGATIVE_INFINITY INT16_C(-32640)
+#define I8_ROW_KERNEL_MAX_D 256
 
 static void *aligned_allocate(size_t alignment,size_t bytes) {
     void *pointer=NULL;
@@ -386,8 +387,8 @@ static void update_avx512_destination(
                 _mm512_cmpneq_epi16_mask(smn,infinity);
             const __m512i lo=_mm512_mask_add_epi16(
                 _mm512_sub_epi16(add,smx),positive,smn,add);
-            const __m512i hi=_mm512_mask_add_epi16(
-                _mm512_sub_epi16(add,smn),positive,smx,add);
+            const __m512i hi=_mm512_add_epi16(
+                lo,_mm512_sub_epi16(smx,smn));
             const __mmask32 minmask=reachable&
                 _mm512_cmplt_epi16_mask(lo,dmn);
             const __mmask32 maxmask=reachable&
@@ -411,6 +412,152 @@ static void update_avx512_destination(
         if (!r) {
             _mm512_store_si512((void *)(dst_mn+d),dmn);
             _mm512_store_si512((void *)(dst_mx+d),dmx);
+        }
+    }
+}
+
+static void update_avx512_row(
+    const int16_t *old_mn,const int16_t *old_mx,
+    int16_t *new_mn,int16_t *new_mx,uint8_t *parent,
+    const SubseqHashI8Tables *t,size_t score_stride,size_t state_count,
+    size_t h,size_t row,size_t min_e,size_t max_e,unsigned original) {
+    const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
+    const __m512i negative_infinity=
+        _mm512_set1_epi16(I8_NEGATIVE_INFINITY);
+    const __m256i high_mask=_mm256_set1_epi8((char)0xf0);
+    const size_t d=t->d;
+    const size_t state_base=triangular_state(state_count,h,0,score_stride);
+    const size_t parent_base=triangular_state(state_count,h,0,d);
+    const size_t deletion_base=h?
+        triangular_state(state_count,h-1,0,score_stride):0;
+    const size_t table_row=row*4;
+    const size_t original_table=(table_row+original)*d;
+    const size_t original_shift=t->C[table_row+original];
+    const int8_t *substitution_A[3];
+    const uint32_t *substitution_masks[3];
+    size_t substitution_shifts[3];
+    unsigned substitution_symbols[3];
+    unsigned symbol,index=0;
+    size_t r,e;
+    for (symbol=0;symbol<4;++symbol) if (symbol!=original) {
+        const size_t base=(table_row+symbol)*d;
+        substitution_A[index]=t->signed_A+base;
+        substitution_masks[index]=t->B1_masks+
+            (table_row+symbol)*t->blocks;
+        substitution_shifts[index]=t->C[table_row+symbol];
+        substitution_symbols[index]=symbol;
+        ++index;
+    }
+    for (r=0;r<d;r+=32) {
+        __m512i substitution_add[3];
+        __mmask32 substitution_positive[3];
+        const __m512i original_add=_mm512_cvtepi8_epi16(
+            _mm256_load_si256((const __m256i *)(t->signed_A+
+                                                original_table+r)));
+        const __mmask32 original_positive=(__mmask32)
+            t->B1_masks[(table_row+original)*t->blocks+r/32];
+        const unsigned original_base=original*2u;
+        const __m256i original_code=_mm256_mask_blend_epi8(
+            original_positive,
+            _mm256_set1_epi8((char)(
+                (original_base+2u)|((original_base+1u)<<4))),
+            _mm256_set1_epi8((char)(
+                (original_base+1u)|((original_base+2u)<<4))));
+        unsigned candidate;
+#pragma GCC unroll 3
+        for (candidate=0;candidate<3;++candidate) {
+            substitution_add[candidate]=_mm512_cvtepi8_epi16(
+                _mm256_load_si256((const __m256i *)(
+                    substitution_A[candidate]+r)));
+            substitution_positive[candidate]=(__mmask32)
+                substitution_masks[candidate][r/32];
+        }
+        for (e=min_e;e<=max_e;++e) {
+            int16_t *destination_mn=new_mn+state_base+e*score_stride;
+            int16_t *destination_mx=new_mx+state_base+e*score_stride;
+            uint8_t *destination_parent=parent+parent_base+e*d;
+            __m512i dmn=h?_mm512_load_si512((const void *)(
+                old_mn+deletion_base+e*score_stride+r)):infinity;
+            __m512i dmx=h?_mm512_load_si512((const void *)(
+                old_mx+deletion_base+e*score_stride+r)):negative_infinity;
+            __m256i parent_low=_mm256_setzero_si256();
+            __m256i parent_high=_mm256_setzero_si256();
+            if (e) {
+                const int16_t *source_mn=old_mn+state_base+
+                    (e-1)*score_stride;
+                const int16_t *source_mx=old_mx+state_base+
+                    (e-1)*score_stride;
+#pragma GCC unroll 3
+                for (candidate=0;candidate<3;++candidate) {
+                    const size_t shift=substitution_shifts[candidate];
+                    const size_t q=r>=shift?r-shift:r+d-shift;
+                    const __m512i smn=_mm512_loadu_si512(
+                        (const void *)(source_mn+q));
+                    const __m512i smx=_mm512_loadu_si512(
+                        (const void *)(source_mx+q));
+                    const __mmask32 reachable=
+                        _mm512_cmpneq_epi16_mask(smn,infinity);
+                    const __m512i lo=_mm512_mask_add_epi16(
+                        _mm512_sub_epi16(substitution_add[candidate],smx),
+                        substitution_positive[candidate],smn,
+                        substitution_add[candidate]);
+                    const __m512i hi=_mm512_add_epi16(
+                        lo,_mm512_sub_epi16(smx,smn));
+                    const __mmask32 minmask=reachable&
+                        _mm512_cmplt_epi16_mask(lo,dmn);
+                    const __mmask32 maxmask=reachable&
+                        _mm512_cmpgt_epi16_mask(hi,dmx);
+                    const unsigned base=substitution_symbols[candidate]*2u;
+                    const __m256i code=_mm256_mask_blend_epi8(
+                        substitution_positive[candidate],
+                        _mm256_set1_epi8((char)(
+                            (base+2u)|((base+1u)<<4))),
+                        _mm256_set1_epi8((char)(
+                            (base+1u)|((base+2u)<<4))));
+                    parent_low=_mm256_mask_mov_epi8(
+                        parent_low,minmask,code);
+                    parent_high=_mm256_mask_mov_epi8(
+                        parent_high,maxmask,code);
+                    dmn=_mm512_mask_mov_epi16(dmn,minmask,lo);
+                    dmx=_mm512_mask_mov_epi16(dmx,maxmask,hi);
+                }
+            }
+            if (e<=row) {
+                const int16_t *source_mn=old_mn+state_base+e*score_stride;
+                const int16_t *source_mx=old_mx+state_base+e*score_stride;
+                const size_t q=r>=original_shift?
+                    r-original_shift:r+d-original_shift;
+                const __m512i smn=_mm512_loadu_si512(
+                    (const void *)(source_mn+q));
+                const __m512i smx=_mm512_loadu_si512(
+                    (const void *)(source_mx+q));
+                const __mmask32 reachable=
+                    _mm512_cmpneq_epi16_mask(smn,infinity);
+                const __m512i lo=_mm512_mask_add_epi16(
+                    _mm512_sub_epi16(original_add,smx),original_positive,
+                    smn,original_add);
+                const __m512i hi=_mm512_add_epi16(
+                    lo,_mm512_sub_epi16(smx,smn));
+                const __mmask32 minmask=reachable&
+                    _mm512_cmplt_epi16_mask(lo,dmn);
+                const __mmask32 maxmask=reachable&
+                    _mm512_cmpgt_epi16_mask(hi,dmx);
+                parent_low=_mm256_mask_mov_epi8(
+                    parent_low,minmask,original_code);
+                parent_high=_mm256_mask_mov_epi8(
+                    parent_high,maxmask,original_code);
+                dmn=_mm512_mask_mov_epi16(dmn,minmask,lo);
+                dmx=_mm512_mask_mov_epi16(dmx,maxmask,hi);
+            }
+            _mm512_store_si512((void *)(destination_mn+r),dmn);
+            _mm512_store_si512((void *)(destination_mx+r),dmx);
+            _mm256_store_si256((__m256i *)(destination_parent+r),
+                _mm256_ternarylogic_epi32(
+                    parent_low,parent_high,high_mask,0xd8));
+            if (!r) {
+                _mm512_store_si512((void *)(destination_mn+d),dmn);
+                _mm512_store_si512((void *)(destination_mx+d),dmx);
+            }
         }
     }
 }
@@ -618,6 +765,10 @@ static int compute_all_edit_splits_i8_impl(
                 const size_t retained=l-h;
                 const size_t max_e=retained<total_edits-h?
                     retained:total_edits-h;
+                const size_t remaining=n-l;
+                const size_t min_e=total_edits>remaining+h?
+                    total_edits-remaining-h:0;
+                if (min_e>max_e) continue;
                 if (!retained) {
                     const size_t src=I8_SCORE_STATE(h-1,0,0);
                     const size_t dst=I8_SCORE_STATE(h,0,0);
@@ -628,70 +779,84 @@ static int compute_all_edit_splits_i8_impl(
                     memset(parent+I8_PARENT(l,h,0,0),0,d);
                     continue;
                 }
-                {
-                const size_t row=retained-1;
-                const int8_t *substitution_A[3];
-                const uint32_t *substitution_masks[3];
-                size_t substitution_shifts[3];
-                unsigned substitution_symbols[3],substitution_count=0;
-                const size_t original_base=(row*4+original)*d;
-                for (a=0;a<4;++a) if (a!=original) {
-                    const size_t base=(row*4+a)*d;
-                    substitution_A[substitution_count]=t->signed_A+base;
-                    substitution_masks[substitution_count]=t->B1_masks+
-                        (row*4+a)*t->blocks;
-                    substitution_shifts[substitution_count]=t->C[4*row+a];
-                    substitution_symbols[substitution_count++]=(unsigned)a;
-                }
-                for (e=0;e<=max_e;++e) {
-                    const int16_t *candidate_mn[4],*candidate_mx[4];
-                    const int8_t *candidate_A[4];
-                    const uint32_t *candidate_masks[4];
-                    size_t candidate_shifts[4];
-                    unsigned candidate_symbols[4],count=0;
-                    const int16_t *initial_mn=h?
-                        old_mn+I8_SCORE_STATE(h-1,e,0):NULL;
-                    const int16_t *initial_mx=h?
-                        old_mx+I8_SCORE_STATE(h-1,e,0):NULL;
-                    if (e) for (a=0;a<3;++a) {
-                        candidate_mn[count]=old_mn+I8_SCORE_STATE(h,e-1,0);
-                        candidate_mx[count]=old_mx+I8_SCORE_STATE(h,e-1,0);
-                        candidate_A[count]=substitution_A[a];
-                        candidate_masks[count]=substitution_masks[a];
-                        candidate_shifts[count]=substitution_shifts[a];
-                        candidate_symbols[count++]=substitution_symbols[a];
+                /* Reusing table vectors across edit states wins while a row
+                   remains cache-resident. Larger rows retain the existing
+                   destination-major traversal for sequential score access. */
+                if (d<=I8_ROW_KERNEL_MAX_D) {
+                    update_avx512_row(old_mn,old_mx,new_mn,new_mx,
+                        parent+(l-1)*band,t,score_stride,e_count,h,
+                        retained-1,min_e,max_e,(unsigned)original);
+                } else {
+                    const size_t row=retained-1;
+                    const int8_t *substitution_A[3];
+                    const uint32_t *substitution_masks[3];
+                    size_t substitution_shifts[3];
+                    unsigned substitution_symbols[3],substitution_count=0;
+                    const size_t original_base=(row*4+original)*d;
+                    for (a=0;a<4;++a) if (a!=original) {
+                        const size_t base=(row*4+a)*d;
+                        substitution_A[substitution_count]=t->signed_A+base;
+                        substitution_masks[substitution_count]=t->B1_masks+
+                            (row*4+a)*t->blocks;
+                        substitution_shifts[substitution_count]=t->C[4*row+a];
+                        substitution_symbols[substitution_count]=(unsigned)a;
+                        ++substitution_count;
                     }
-                    if (e<=row) {
-                        candidate_mn[count]=old_mn+I8_SCORE_STATE(h,e,0);
-                        candidate_mx[count]=old_mx+I8_SCORE_STATE(h,e,0);
-                        candidate_A[count]=t->signed_A+original_base;
-                        candidate_masks[count]=t->B1_masks+
-                            (row*4+original)*t->blocks;
-                        candidate_shifts[count]=t->C[4*row+original];
-                        candidate_symbols[count++]=(unsigned)original;
+                    for (e=min_e;e<=max_e;++e) {
+                        const int16_t *candidate_mn[4],*candidate_mx[4];
+                        const int8_t *candidate_A[4];
+                        const uint32_t *candidate_masks[4];
+                        size_t candidate_shifts[4];
+                        unsigned candidate_symbols[4],count=0;
+                        const int16_t *initial_mn=h?
+                            old_mn+I8_SCORE_STATE(h-1,e,0):NULL;
+                        const int16_t *initial_mx=h?
+                            old_mx+I8_SCORE_STATE(h-1,e,0):NULL;
+                        if (e) for (a=0;a<3;++a) {
+                            candidate_mn[count]=
+                                old_mn+I8_SCORE_STATE(h,e-1,0);
+                            candidate_mx[count]=
+                                old_mx+I8_SCORE_STATE(h,e-1,0);
+                            candidate_A[count]=substitution_A[a];
+                            candidate_masks[count]=substitution_masks[a];
+                            candidate_shifts[count]=substitution_shifts[a];
+                            candidate_symbols[count]=substitution_symbols[a];
+                            ++count;
+                        }
+                        if (e<=row) {
+                            candidate_mn[count]=
+                                old_mn+I8_SCORE_STATE(h,e,0);
+                            candidate_mx[count]=
+                                old_mx+I8_SCORE_STATE(h,e,0);
+                            candidate_A[count]=t->signed_A+original_base;
+                            candidate_masks[count]=t->B1_masks+
+                                (row*4+original)*t->blocks;
+                            candidate_shifts[count]=t->C[4*row+original];
+                            candidate_symbols[count]=(unsigned)original;
+                            ++count;
+                        }
+                        if (count==4)
+                            update_avx512_destination(candidate_mn,candidate_mx,
+                                new_mn+I8_SCORE_STATE(h,e,0),
+                                new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
+                                candidate_masks,
+                                parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
+                                candidate_symbols,4,initial_mn,initial_mx);
+                        else if (count==3)
+                            update_avx512_destination(candidate_mn,candidate_mx,
+                                new_mn+I8_SCORE_STATE(h,e,0),
+                                new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
+                                candidate_masks,
+                                parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
+                                candidate_symbols,3,initial_mn,initial_mx);
+                        else
+                            update_avx512_destination(candidate_mn,candidate_mx,
+                                new_mn+I8_SCORE_STATE(h,e,0),
+                                new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
+                                candidate_masks,
+                                parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
+                                candidate_symbols,1,initial_mn,initial_mx);
                     }
-                    if (count==4)
-                        update_avx512_destination(candidate_mn,candidate_mx,
-                            new_mn+I8_SCORE_STATE(h,e,0),
-                            new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
-                            candidate_masks,
-                            parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
-                            candidate_symbols,4,initial_mn,initial_mx);
-                    else if (count==3)
-                        update_avx512_destination(candidate_mn,candidate_mx,
-                            new_mn+I8_SCORE_STATE(h,e,0),
-                            new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
-                            candidate_masks,
-                            parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
-                            candidate_symbols,3,initial_mn,initial_mx);
-                    else
-                        update_avx512_destination(candidate_mn,candidate_mx,
-                            new_mn+I8_SCORE_STATE(h,e,0),
-                            new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
-                            candidate_masks,
-                            parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
-                            candidate_symbols,1,initial_mn,initial_mx);
-                }
                 }
             }
             goto layer_complete;
