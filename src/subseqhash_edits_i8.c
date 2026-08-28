@@ -352,15 +352,13 @@ static void update_avx512_destination(
     const int16_t *const src_mn[4],const int16_t *const src_mx[4],
     int16_t *dst_mn,int16_t *dst_mx,
     const int8_t *const signed_A[4],const uint32_t *const B1_masks[4],
-    const uint16_t *wrap_indices,uint8_t *decision,size_t d,
+    uint8_t *decision,size_t d,
     const size_t shifts[4],const unsigned symbols[4],unsigned count,
     const int16_t *initial_mn,const int16_t *initial_mx) {
     const __m512i infinity=_mm512_set1_epi16(I8_POSITIVE_INFINITY);
     const __m512i negative_infinity=
         _mm512_set1_epi16(I8_NEGATIVE_INFINITY);
-    const __m512i zero=_mm512_setzero_si512();
-    const __m256i low_keep=_mm256_set1_epi8((char)0xf0);
-    const __m256i high_keep=_mm256_set1_epi8(0x0f);
+    const __m256i high_mask=_mm256_set1_epi8((char)0xf0);
     size_t r;
     for (r=0;r<d;r+=32) {
         __m512i dmn=initial_mn?
@@ -368,16 +366,17 @@ static void update_avx512_destination(
         __m512i dmx=initial_mx?
             _mm512_load_si512((const void *)(initial_mx+r)):
             negative_infinity;
-        __m256i parent=_mm256_setzero_si256();
+        __m256i parent_low=_mm256_setzero_si256();
+        __m256i parent_high=_mm256_setzero_si256();
         unsigned candidate;
 #pragma GCC unroll 4
         for (candidate=0;candidate<count;++candidate) {
             const size_t shift=shifts[candidate];
             const size_t q=r>=shift?r-shift:r+d-shift;
-            const __m512i smn=load_wrapped_i16(
-                src_mn[candidate],d,q,wrap_indices);
-            const __m512i smx=load_wrapped_i16(
-                src_mx[candidate],d,q,wrap_indices);
+            const __m512i smn=_mm512_loadu_si512(
+                (const void *)(src_mn[candidate]+q));
+            const __m512i smx=_mm512_loadu_si512(
+                (const void *)(src_mx[candidate]+q));
             const __m256i a8=_mm256_load_si256(
                 (const __m256i *)(signed_A[candidate]+r));
             const __m512i add=_mm512_cvtepi8_epi16(a8);
@@ -385,36 +384,34 @@ static void update_avx512_destination(
                 B1_masks[candidate][r/32];
             const __mmask32 reachable=
                 _mm512_cmpneq_epi16_mask(smn,infinity);
-            const __m512i lo=_mm512_add_epi16(
-                _mm512_mask_blend_epi16(positive,
-                    _mm512_sub_epi16(zero,smx),smn),add);
-            const __m512i hi=_mm512_add_epi16(
-                _mm512_mask_blend_epi16(positive,
-                    _mm512_sub_epi16(zero,smn),smx),add);
+            const __m512i lo=_mm512_mask_add_epi16(
+                _mm512_sub_epi16(add,smx),positive,smn,add);
+            const __m512i hi=_mm512_mask_add_epi16(
+                _mm512_sub_epi16(add,smn),positive,smx,add);
             const __mmask32 minmask=reachable&
                 _mm512_cmplt_epi16_mask(lo,dmn);
             const __mmask32 maxmask=reachable&
                 _mm512_cmpgt_epi16_mask(hi,dmx);
             const unsigned base=symbols[candidate]*2u;
-            __m256i code=_mm256_mask_blend_epi8(
-                positive,_mm256_set1_epi8((char)(base+2u)),
-                _mm256_set1_epi8((char)(base+1u)));
-            __m256i updated=_mm256_or_si256(
-                _mm256_and_si256(parent,low_keep),code);
-            parent=_mm256_mask_mov_epi8(parent,minmask,updated);
-            code=_mm256_mask_blend_epi8(
-                positive,_mm256_set1_epi8((char)(base+1u)),
-                _mm256_set1_epi8((char)(base+2u)));
-            code=_mm256_slli_epi16(code,4);
-            updated=_mm256_or_si256(
-                _mm256_and_si256(parent,high_keep),code);
-            parent=_mm256_mask_mov_epi8(parent,maxmask,updated);
+            const __m256i code=_mm256_mask_blend_epi8(positive,
+                _mm256_set1_epi8((char)(
+                    (base+2u)|((base+1u)<<4))),
+                _mm256_set1_epi8((char)(
+                    (base+1u)|((base+2u)<<4))));
+            parent_low=_mm256_mask_mov_epi8(parent_low,minmask,code);
+            parent_high=_mm256_mask_mov_epi8(parent_high,maxmask,code);
             dmn=_mm512_mask_mov_epi16(dmn,minmask,lo);
             dmx=_mm512_mask_mov_epi16(dmx,maxmask,hi);
         }
         _mm512_store_si512((void *)(dst_mn+r),dmn);
         _mm512_store_si512((void *)(dst_mx+r),dmx);
-        _mm256_store_si256((__m256i *)(decision+r),parent);
+        _mm256_store_si256((__m256i *)(decision+r),
+            _mm256_ternarylogic_epi32(
+                parent_low,parent_high,high_mask,0xd8));
+        if (!r) {
+            _mm512_store_si512((void *)(dst_mn+d),dmn);
+            _mm512_store_si512((void *)(dst_mx+d),dmx);
+        }
     }
 }
 #endif
@@ -551,7 +548,9 @@ static int compute_all_edit_splits_i8_impl(
     const uint8_t *s,size_t n,size_t total_edits,
     const SubseqHashI8Tables *t,SubseqHashEditResult *results,int use_aligned,
     I8DPWorkspace *workspace) {
-    size_t d,e_count,band,parent_states,l,h,e,q,r,a,result_index;
+    size_t d,e_count,state_count,score_stride,score_band,score_bytes;
+    size_t band,parent_states;
+    size_t l,h,e,q,r,a,result_index;
     int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
     uint8_t *parent=NULL;
     int status=-1;
@@ -561,30 +560,49 @@ static int compute_all_edit_splits_i8_impl(
     if (!e_count || e_count>SIZE_MAX/sizeof(*results) ||
         e_count==SIZE_MAX || e_count>SIZE_MAX/(e_count+1) ||
         e_count*(e_count+1)/2>SIZE_MAX/d) return -1;
-    band=e_count*(e_count+1)/2*d;
-    if (band>SIZE_MAX/(4*sizeof(*scores)) || (n&&band>SIZE_MAX/n))
-        return -1;
+    state_count=e_count*(e_count+1)/2;
+    score_stride=d;
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+    if (use_aligned && !(d&31u)) {
+        if (d>SIZE_MAX-32) return -1;
+        score_stride=d+32;
+    }
+#endif
+    if (state_count>SIZE_MAX/score_stride) return -1;
+    score_band=state_count*score_stride;
+    band=state_count*d;
+    if (score_band>SIZE_MAX/(4*sizeof(*scores)) ||
+        (n&&band>SIZE_MAX/n)) return -1;
     parent_states=n*band;
+    score_bytes=4*score_band*sizeof(*scores);
+    if (parent_states>SIZE_MAX-score_bytes) return -1;
     memset(results,0,e_count*sizeof(*results));
     for (l=0;l<n;++l) if (s[l]>3) return -1;
     if (workspace) {
-        if (i8_workspace_reserve(workspace,4*band,parent_states)) goto done;
+        if (i8_workspace_reserve(
+                workspace,4*score_band,parent_states)) goto done;
         scores=workspace->scores; parent=workspace->parent;
     } else {
-        scores=aligned_allocate(64,4*band*sizeof(*scores));
-        parent=aligned_allocate(64,parent_states?parent_states:1);
-        if (!scores || !parent) goto done;
+        scores=aligned_allocate(64,score_bytes+parent_states);
+        if (!scores) goto done;
+        parent=(uint8_t *)scores+score_bytes;
     }
-    memset(parent,0,parent_states?parent_states:1);
-    old_mn=scores; old_mx=old_mn+band;
-    new_mn=old_mx+band; new_mx=new_mn+band;
+    if (score_stride==d)
+        memset(parent,0,parent_states?parent_states:1);
+    old_mn=scores; old_mx=old_mn+score_band;
+    new_mn=old_mx+score_band; new_mx=new_mn+score_band;
     /* At layer zero only (h,e)=(0,0) is reachable. Every other state is
        initialized immediately before the first layer that can reach it. */
-    memset(old_mn,0x7f,d*sizeof(*old_mn));
-    memset(old_mx,0x80,d*sizeof(*old_mx));
+    memset(old_mn,0x7f,score_stride*sizeof(*old_mn));
+    memset(old_mx,0x80,score_stride*sizeof(*old_mx));
 #define I8_STATE(H,E,R) (triangular_state(e_count,(H),(E),d)+(R))
+#define I8_SCORE_STATE(H,E,R) (triangular_state(e_count,(H),(E),score_stride)+(R))
 #define I8_PARENT(L,H,E,R) ((((L)-1)*band)+I8_STATE(H,E,R))
     old_mn[0]=old_mx[0]=0;
+    if (score_stride!=d) {
+        memcpy(old_mn+d,old_mn,32*sizeof(*old_mn));
+        memcpy(old_mx+d,old_mx,32*sizeof(*old_mx));
+    }
     for (l=1;l<=n;++l) {
         const size_t original=s[l-1];
         const size_t previous_max_h=(l-1)<total_edits?(l-1):total_edits;
@@ -601,10 +619,13 @@ static int compute_all_edit_splits_i8_impl(
                 const size_t max_e=retained<total_edits-h?
                     retained:total_edits-h;
                 if (!retained) {
-                    const size_t src=I8_STATE(h-1,0,0);
-                    const size_t dst=I8_STATE(h,0,0);
-                    memcpy(new_mn+dst,old_mn+src,d*sizeof(*new_mn));
-                    memcpy(new_mx+dst,old_mx+src,d*sizeof(*new_mx));
+                    const size_t src=I8_SCORE_STATE(h-1,0,0);
+                    const size_t dst=I8_SCORE_STATE(h,0,0);
+                    memcpy(new_mn+dst,old_mn+src,
+                           score_stride*sizeof(*new_mn));
+                    memcpy(new_mx+dst,old_mx+src,
+                           score_stride*sizeof(*new_mx));
+                    memset(parent+I8_PARENT(l,h,0,0),0,d);
                     continue;
                 }
                 {
@@ -629,20 +650,20 @@ static int compute_all_edit_splits_i8_impl(
                     size_t candidate_shifts[4];
                     unsigned candidate_symbols[4],count=0;
                     const int16_t *initial_mn=h?
-                        old_mn+I8_STATE(h-1,e,0):NULL;
+                        old_mn+I8_SCORE_STATE(h-1,e,0):NULL;
                     const int16_t *initial_mx=h?
-                        old_mx+I8_STATE(h-1,e,0):NULL;
+                        old_mx+I8_SCORE_STATE(h-1,e,0):NULL;
                     if (e) for (a=0;a<3;++a) {
-                        candidate_mn[count]=old_mn+I8_STATE(h,e-1,0);
-                        candidate_mx[count]=old_mx+I8_STATE(h,e-1,0);
+                        candidate_mn[count]=old_mn+I8_SCORE_STATE(h,e-1,0);
+                        candidate_mx[count]=old_mx+I8_SCORE_STATE(h,e-1,0);
                         candidate_A[count]=substitution_A[a];
                         candidate_masks[count]=substitution_masks[a];
                         candidate_shifts[count]=substitution_shifts[a];
                         candidate_symbols[count++]=substitution_symbols[a];
                     }
                     if (e<=row) {
-                        candidate_mn[count]=old_mn+I8_STATE(h,e,0);
-                        candidate_mx[count]=old_mx+I8_STATE(h,e,0);
+                        candidate_mn[count]=old_mn+I8_SCORE_STATE(h,e,0);
+                        candidate_mx[count]=old_mx+I8_SCORE_STATE(h,e,0);
                         candidate_A[count]=t->signed_A+original_base;
                         candidate_masks[count]=t->B1_masks+
                             (row*4+original)*t->blocks;
@@ -651,23 +672,23 @@ static int compute_all_edit_splits_i8_impl(
                     }
                     if (count==4)
                         update_avx512_destination(candidate_mn,candidate_mx,
-                            new_mn+I8_STATE(h,e,0),
-                            new_mx+I8_STATE(h,e,0),candidate_A,
-                            candidate_masks,t->wrap_indices,
+                            new_mn+I8_SCORE_STATE(h,e,0),
+                            new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
+                            candidate_masks,
                             parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
                             candidate_symbols,4,initial_mn,initial_mx);
                     else if (count==3)
                         update_avx512_destination(candidate_mn,candidate_mx,
-                            new_mn+I8_STATE(h,e,0),
-                            new_mx+I8_STATE(h,e,0),candidate_A,
-                            candidate_masks,t->wrap_indices,
+                            new_mn+I8_SCORE_STATE(h,e,0),
+                            new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
+                            candidate_masks,
                             parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
                             candidate_symbols,3,initial_mn,initial_mx);
                     else
                         update_avx512_destination(candidate_mn,candidate_mx,
-                            new_mn+I8_STATE(h,e,0),
-                            new_mx+I8_STATE(h,e,0),candidate_A,
-                            candidate_masks,t->wrap_indices,
+                            new_mn+I8_SCORE_STATE(h,e,0),
+                            new_mx+I8_SCORE_STATE(h,e,0),candidate_A,
+                            candidate_masks,
                             parent+I8_PARENT(l,h,e,0),d,candidate_shifts,
                             candidate_symbols,1,initial_mn,initial_mx);
                 }
@@ -687,7 +708,7 @@ static int compute_all_edit_splits_i8_impl(
         }
         for (h=0;h<deletion_h_count;++h)
             for (e=0;e+h+1<=total_edits && e<=(l-1)-h;++e) {
-                size_t src=I8_STATE(h,e,0),dst=I8_STATE(h+1,e,0);
+                size_t src=I8_SCORE_STATE(h,e,0),dst=I8_SCORE_STATE(h+1,e,0);
                 memcpy(new_mn+dst,old_mn+src,d*sizeof(*new_mn));
                 memcpy(new_mx+dst,old_mx+src,d*sizeof(*new_mx));
             }
@@ -698,9 +719,9 @@ static int compute_all_edit_splits_i8_impl(
                 a=original;
                 {
                     const size_t table_base=(row*4+a)*d;
-                    update_shifted(old_mn+I8_STATE(h,e,0),
-                        old_mx+I8_STATE(h,e,0),
-                        new_mn+I8_STATE(h,e,0),new_mx+I8_STATE(h,e,0),
+                    update_shifted(old_mn+I8_SCORE_STATE(h,e,0),
+                        old_mx+I8_SCORE_STATE(h,e,0),
+                        new_mn+I8_SCORE_STATE(h,e,0),new_mx+I8_SCORE_STATE(h,e,0),
                         t->A+table_base,t->B1+table_base,
                         t->B2+table_base,t->signed_A+table_base,
                         t->B1_masks+(row*4+a)*t->blocks,t->wrap_indices,
@@ -723,10 +744,10 @@ static int compute_all_edit_splits_i8_impl(
                             substitution_symbols[index++]=(unsigned)a;
                         }
                         update_avx512_substitutions(
-                            old_mn+I8_STATE(h,e,0),
-                            old_mx+I8_STATE(h,e,0),
-                            new_mn+I8_STATE(h,e+1,0),
-                            new_mx+I8_STATE(h,e+1,0),substitution_A,
+                            old_mn+I8_SCORE_STATE(h,e,0),
+                            old_mx+I8_SCORE_STATE(h,e,0),
+                            new_mn+I8_SCORE_STATE(h,e+1,0),
+                            new_mx+I8_SCORE_STATE(h,e+1,0),substitution_A,
                             substitution_masks,t->wrap_indices,
                             parent+I8_PARENT(l,h,e+1,0),d,
                             substitution_shifts,substitution_symbols,
@@ -735,10 +756,10 @@ static int compute_all_edit_splits_i8_impl(
 #endif
                     for (a=0;a<4;++a) if (a!=original) {
                         const size_t table_base=(row*4+a)*d;
-                        update_shifted(old_mn+I8_STATE(h,e,0),
-                            old_mx+I8_STATE(h,e,0),
-                            new_mn+I8_STATE(h,e+1,0),
-                            new_mx+I8_STATE(h,e+1,0),
+                        update_shifted(old_mn+I8_SCORE_STATE(h,e,0),
+                            old_mx+I8_SCORE_STATE(h,e,0),
+                            new_mn+I8_SCORE_STATE(h,e+1,0),
+                            new_mx+I8_SCORE_STATE(h,e+1,0),
                             t->A+table_base,t->B1+table_base,
                             t->B2+table_base,t->signed_A+table_base,
                             t->B1_masks+(row*4+a)*t->blocks,
@@ -765,15 +786,15 @@ layer_complete:
         out->substituted=malloc(k?k:1);
         if (!out->seed || !out->positions || !out->substituted) goto done;
         for (r=0;r<d &&
-             old_mn[I8_STATE(deletions,substitutions,r)]==I8_POSITIVE_INFINITY;++r) {}
+             old_mn[I8_SCORE_STATE(deletions,substitutions,r)]==I8_POSITIVE_INFINITY;++r) {}
         if (r==d) goto done;
         out->psi=r;
-        type=llabs((long long)old_mn[I8_STATE(deletions,substitutions,r)])>=
-             llabs((long long)old_mx[I8_STATE(deletions,substitutions,r)])
+        type=llabs((long long)old_mn[I8_SCORE_STATE(deletions,substitutions,r)])>=
+             llabs((long long)old_mx[I8_SCORE_STATE(deletions,substitutions,r)])
              ?1:2;
         out->omega=(double)(type==1?
-            old_mn[I8_STATE(deletions,substitutions,r)]:
-            old_mx[I8_STATE(deletions,substitutions,r)]);
+            old_mn[I8_SCORE_STATE(deletions,substitutions,r)]:
+            old_mx[I8_SCORE_STATE(deletions,substitutions,r)]);
         l=n; h=deletions; e=substitutions; q=k;
         while (q) {
             uint8_t packed=parent[I8_PARENT(l,h,e,r)];
@@ -790,9 +811,10 @@ layer_complete:
     status=0;
 done:
     if (status) subseqhash_edit_results_destroy(results,e_count);
-    if (!workspace) { free(parent); free(scores); }
+    if (!workspace) free(scores);
     return status;
 #undef I8_PARENT
+#undef I8_SCORE_STATE
 #undef I8_STATE
 }
 
@@ -1154,7 +1176,7 @@ int subseqhash_compute_all_edit_splits_i8_legacy(
 
 const char *subseqhash_edits_i8_backend(void) {
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
-    return "AVX-512BW (32 x int16 states; aligned vpermt2w)";
+    return "AVX-512BW (32 x int16 states; padded circular loads)";
 #elif HAVE_AVX512_I8_DP
     return "AVX-512BW (32 x int16 states; scalar parents)";
 #else

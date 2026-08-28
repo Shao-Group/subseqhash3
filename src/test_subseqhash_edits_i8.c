@@ -116,8 +116,9 @@ int main(void) {
 
     size_t trial;
     test_long_windows();
-    for (trial=0;trial<100;++trial) {
-        const size_t n=3+trial%5,edits=trial%3,d=3+trial%13;
+    for (trial=0;trial<200;++trial) {
+        const size_t n=3+trial%5,edits=trial%3;
+        const size_t d=trial<100?3+trial%13:32*(1+trial%2);
         uint8_t s[7]; size_t i,split;
         SubseqHashI8Tables compact;
         SubseqHashTables reference;
