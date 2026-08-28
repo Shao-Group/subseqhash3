@@ -8,6 +8,7 @@ typedef struct {
     int8_t *A;
     int8_t *B1, *B2;
     int8_t *signed_A;
+    uint8_t *parent_codes;
     uint32_t *B1_masks;
     size_t blocks;
     uint16_t *wrap_indices;
