@@ -15,7 +15,7 @@
 
 #define I8_POSITIVE_INFINITY INT16_C(32639)
 #define I8_NEGATIVE_INFINITY INT16_C(-32640)
-#define I8_ROW_KERNEL_MAX_D 512
+#define I8_ROW_KERNEL_MAX_D 256
 
 static void *aligned_allocate(size_t alignment,size_t bytes) {
     void *pointer=NULL;
@@ -56,11 +56,10 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
     t->A=malloc((cells?cells:1)*sizeof(*t->A));
     t->B1=malloc(cells?cells:1); t->B2=malloc(cells?cells:1);
     t->signed_A=aligned_allocate(64,(cells?cells:1)*sizeof(*t->signed_A));
-    t->parent_codes=aligned_allocate(64,cells?cells:64);
     t->B1_masks=calloc(mask_cells?mask_cells:1,sizeof(*t->B1_masks));
     t->wrap_indices=malloc(32*32*sizeof(*t->wrap_indices));
     t->C=malloc((k?k*4:1)*sizeof(*t->C));
-    if (!t->A || !t->B1 || !t->B2 || !t->signed_A || !t->parent_codes ||
+    if (!t->A || !t->B1 || !t->B2 || !t->signed_A ||
         !t->B1_masks || !t->wrap_indices || !t->C) {
         subseqhash_i8_tables_destroy(t); return -1;
     }
@@ -81,12 +80,6 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
             t->B1[x]=b1[permutation[a]];
             t->B2[x]=b2[permutation[a]];
             t->signed_A[x]=(int8_t)(t->A[x]*t->B2[x]);
-            {
-                const unsigned base=(unsigned)a*2u;
-                t->parent_codes[x]=(uint8_t)(t->B1[x]>0?
-                    ((base+1u)|((base+2u)<<4)):
-                    ((base+2u)|((base+1u)<<4)));
-            }
             if (t->B1[x]>0)
                 t->B1_masks[(i*4+a)*t->blocks+r/32]|=
                     (uint32_t)(UINT32_C(1)<<(r%32));
@@ -105,7 +98,6 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *t,size_t k,size_t d,
 
 void subseqhash_i8_tables_destroy(SubseqHashI8Tables *t) {
     if (!t) return;
-    free(t->parent_codes);
     free(t->C); free(t->wrap_indices); free(t->B1_masks); free(t->signed_A);
     free(t->B2); free(t->B1); free(t->A);
     memset(t,0,sizeof(*t));
@@ -459,14 +451,18 @@ static void update_avx512_row(
     for (r=0;r<d;r+=32) {
         __m512i substitution_add[3];
         __mmask32 substitution_positive[3];
-        __m256i substitution_code[3];
         const __m512i original_add=_mm512_cvtepi8_epi16(
             _mm256_load_si256((const __m256i *)(t->signed_A+
                                                 original_table+r)));
         const __mmask32 original_positive=(__mmask32)
             t->B1_masks[(table_row+original)*t->blocks+r/32];
-        const __m256i original_code=_mm256_load_si256(
-            (const __m256i *)(t->parent_codes+original_table+r));
+        const unsigned original_base=original*2u;
+        const __m256i original_code=_mm256_mask_blend_epi8(
+            original_positive,
+            _mm256_set1_epi8((char)(
+                (original_base+2u)|((original_base+1u)<<4))),
+            _mm256_set1_epi8((char)(
+                (original_base+1u)|((original_base+2u)<<4))));
         unsigned candidate;
 #pragma GCC unroll 3
         for (candidate=0;candidate<3;++candidate) {
@@ -475,9 +471,6 @@ static void update_avx512_row(
                     substitution_A[candidate]+r)));
             substitution_positive[candidate]=(__mmask32)
                 substitution_masks[candidate][r/32];
-            substitution_code[candidate]=_mm256_load_si256(
-                (const __m256i *)(t->parent_codes+
-                    (table_row+substitution_symbols[candidate])*d+r));
         }
         for (e=min_e;e<=max_e;++e) {
             int16_t *destination_mn=new_mn+state_base+e*score_stride;
@@ -508,18 +501,23 @@ static void update_avx512_row(
                         _mm512_sub_epi16(substitution_add[candidate],smx),
                         substitution_positive[candidate],smn,
                         substitution_add[candidate]);
-                    const __m512i hi=_mm512_mask_add_epi16(
-                        _mm512_sub_epi16(substitution_add[candidate],smn),
-                        substitution_positive[candidate],smx,
-                        substitution_add[candidate]);
+                    const __m512i hi=_mm512_add_epi16(
+                        lo,_mm512_sub_epi16(smx,smn));
                     const __mmask32 minmask=reachable&
                         _mm512_cmplt_epi16_mask(lo,dmn);
                     const __mmask32 maxmask=reachable&
                         _mm512_cmpgt_epi16_mask(hi,dmx);
+                    const unsigned base=substitution_symbols[candidate]*2u;
+                    const __m256i code=_mm256_mask_blend_epi8(
+                        substitution_positive[candidate],
+                        _mm256_set1_epi8((char)(
+                            (base+2u)|((base+1u)<<4))),
+                        _mm256_set1_epi8((char)(
+                            (base+1u)|((base+2u)<<4))));
                     parent_low=_mm256_mask_mov_epi8(
-                        parent_low,minmask,substitution_code[candidate]);
+                        parent_low,minmask,code);
                     parent_high=_mm256_mask_mov_epi8(
-                        parent_high,maxmask,substitution_code[candidate]);
+                        parent_high,maxmask,code);
                     dmn=_mm512_mask_mov_epi16(dmn,minmask,lo);
                     dmx=_mm512_mask_mov_epi16(dmx,maxmask,hi);
                 }
@@ -538,9 +536,8 @@ static void update_avx512_row(
                 const __m512i lo=_mm512_mask_add_epi16(
                     _mm512_sub_epi16(original_add,smx),original_positive,
                     smn,original_add);
-                const __m512i hi=_mm512_mask_add_epi16(
-                    _mm512_sub_epi16(original_add,smn),original_positive,
-                    smx,original_add);
+                const __m512i hi=_mm512_add_epi16(
+                    lo,_mm512_sub_epi16(smx,smn));
                 const __mmask32 minmask=reachable&
                     _mm512_cmplt_epi16_mask(lo,dmn);
                 const __mmask32 maxmask=reachable&
@@ -1280,34 +1277,6 @@ done:
 int subseqhash_compute_all_edit_splits_i8(
     const uint8_t *s,size_t n,size_t total_edits,
     const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
-    if (t && results && t->d && t->k>=n && !total_edits &&
-        (!n || s)) {
-        SubseqHashEditResult *out=results;
-        size_t i,residue=0;
-        int16_t omega=0;
-        memset(out,0,sizeof(*out));
-        out->length=n;
-        out->seed=malloc(n?n:1);
-        out->positions=malloc((n?n:1)*sizeof(*out->positions));
-        out->substituted=calloc(n?n:1,1);
-        if (!out->seed || !out->positions || !out->substituted) {
-            subseqhash_edit_results_destroy(out,1); return -1;
-        }
-        for (i=0;i<n;++i) {
-            size_t cell;
-            const unsigned symbol=s[i];
-            if (symbol>3) {
-                subseqhash_edit_results_destroy(out,1); return -1;
-            }
-            out->seed[i]=(uint8_t)symbol; out->positions[i]=i;
-            residue+=t->C[4*i+symbol];
-            if (residue>=t->d) residue-=t->d;
-            cell=(i*4+symbol)*t->d+residue;
-            omega=(int16_t)(t->B1[cell]*omega+t->signed_A[cell]);
-        }
-        out->psi=residue; out->omega=(double)omega;
-        return 0;
-    }
     return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,1,NULL);
 }
 
