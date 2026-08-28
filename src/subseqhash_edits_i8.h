@@ -32,6 +32,15 @@ int subseqhash_compute_all_edit_splits_i8_legacy(
     const uint8_t *s, size_t n, size_t total_edits,
     const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
 
+/* Compute E+1 edit-split seeds for every window in a long sequence.
+   Results are window-major and then substitution count 0..E. Positions are
+   absolute offsets in sequence. The caller supplies
+   (sequence_length-window_length+1)*(E+1) result entries. */
+int subseqhash_compute_long_edits_i8(
+    const uint8_t *sequence,size_t sequence_length,size_t window_length,
+    size_t total_edits,const SubseqHashI8Tables *tables,
+    SubseqHashEditResult *results);
+
 int subseqhash_compute_all_edit_splits_i8_twopass(
     const uint8_t *s, size_t n, size_t total_edits,
     const SubseqHashI8Tables *tables, SubseqHashEditResult *results);

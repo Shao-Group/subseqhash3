@@ -22,6 +22,7 @@ SUBSEQHASH_EDITS_I16_TEST := $(BUILD_DIR)/test_subseqhash_edits_i16
 SUBSEQHASH_EDITS_I8_TEST := $(BUILD_DIR)/test_subseqhash_edits_i8
 SUBSEQHASH2_EDITS_I8_TEST := $(BUILD_DIR)/test_subseqhash2_edits_i8
 SUBSEQHASH2_SEED_GENERATOR := $(BUILD_DIR)/generate_subseqhash2_seeds
+SUBSEQHASH_I8_SEED_GENERATOR := $(BUILD_DIR)/generate_subseqhash_i8_seeds
 SUBSEQHASH_EDITS_A10_TEST := $(BUILD_DIR)/test_subseqhash_edits_a10
 SUBSEQHASH_EDITS_I16_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash_edits_i16
 SUBSEQHASH_EDITS_I8_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash_edits_i8
@@ -36,7 +37,7 @@ MAX_I8_COLLISION_BENCHMARK := $(BUILD_DIR)/benchmark_max_i8_collisions
 SUBSEQHASH_BENCHMARK := $(BUILD_DIR)/benchmark_subseqhash
 LIB_OBJECT := $(BUILD_DIR)/subsequence_scores.o
 
-.PHONY: all simd test benchmark benchmark-subseqhash benchmark-subseqhash-edits-i16 benchmark-edit-collisions benchmark-i16-collisions benchmark-i8-collisions benchmark-adjacent-collisions witnesses collision-estimator simulate-edit-pairs generate-subseqhash2-seeds sanitize clean clean-simd
+.PHONY: all simd test benchmark benchmark-subseqhash benchmark-subseqhash-edits-i16 benchmark-edit-collisions benchmark-i16-collisions benchmark-i8-collisions benchmark-adjacent-collisions witnesses collision-estimator simulate-edit-pairs generate-subseqhash2-seeds generate-subseqhash-i8-seeds sanitize clean clean-simd
 
 all: $(TARGET) \
 	$(BENCHMARK) \
@@ -52,6 +53,7 @@ all: $(TARGET) \
 	$(SUBSEQHASH_EDITS_I8_TEST) \
 	$(SUBSEQHASH2_EDITS_I8_TEST) \
 	$(SUBSEQHASH2_SEED_GENERATOR) \
+	$(SUBSEQHASH_I8_SEED_GENERATOR) \
 	$(SUBSEQHASH_EDITS_A10_TEST) \
 	$(SUBSEQHASH_EDITS_I16_BENCHMARK) \
 	$(SUBSEQHASH_EDITS_I8_BENCHMARK) \
@@ -75,6 +77,7 @@ simd: clean-simd
 		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/test_subseqhash2_edits_i8 \
 		$(SIMD_BUILD_DIR)/generate_subseqhash2_seeds \
+		$(SIMD_BUILD_DIR)/generate_subseqhash_i8_seeds \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i16 \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_i16_collisions \
@@ -216,6 +219,14 @@ $(SUBSEQHASH2_SEED_GENERATOR): $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subs
 
 generate-subseqhash2-seeds: $(SUBSEQHASH2_SEED_GENERATOR)
 
+$(BUILD_DIR)/generate_subseqhash_i8_seeds.o: $(SRC_DIR)/generate_subseqhash_i8_seeds.c $(SRC_DIR)/subseqhash_edits_i8.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(SUBSEQHASH_I8_SEED_GENERATOR): $(BUILD_DIR)/subseqhash.o $(BUILD_DIR)/subseqhash_edits.o $(BUILD_DIR)/subseqhash_edits_i8.o $(BUILD_DIR)/generate_subseqhash_i8_seeds.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -lm -o $@
+
+generate-subseqhash-i8-seeds: $(SUBSEQHASH_I8_SEED_GENERATOR)
+
 $(BUILD_DIR)/benchmark_subseqhash_edits_i8.o: $(SRC_DIR)/benchmark_subseqhash_edits_i8.c $(SRC_DIR)/subseqhash_edits_i8.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -327,6 +338,7 @@ clean-simd:
 		$(SIMD_BUILD_DIR)/test_subseqhash2_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i16 \
 		$(SIMD_BUILD_DIR)/generate_subseqhash2_seeds \
+		$(SIMD_BUILD_DIR)/generate_subseqhash_i8_seeds \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_i16_collisions \
 		$(SIMD_BUILD_DIR)/benchmark_i8_collisions \
@@ -352,6 +364,7 @@ clean: clean-simd
 		$(SUBSEQHASH_EDITS_I8_TEST) \
 		$(SUBSEQHASH2_EDITS_I8_TEST) \
 		$(SUBSEQHASH2_SEED_GENERATOR) \
+		$(SUBSEQHASH_I8_SEED_GENERATOR) \
 		$(SUBSEQHASH_EDITS_I16_BENCHMARK) \
 		$(SUBSEQHASH_EDITS_I8_BENCHMARK) \
 		$(I16_COLLISION_BENCHMARK) \

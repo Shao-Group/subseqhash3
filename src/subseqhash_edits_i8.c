@@ -1056,7 +1056,32 @@ int subseqhash_compute_all_edit_splits_i8(
     return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,1);
 }
 
+int subseqhash_compute_long_edits_i8(
+    const uint8_t *s,size_t N,size_t n,size_t total_edits,
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
+    size_t windows,per,total,w,split,i;
+    if (!t || !results || !n || n>N || total_edits>n || !t->d ||
+        t->k<n || (N&&!s) || total_edits==SIZE_MAX) return -1;
+    windows=N-n+1; per=total_edits+1;
+    if (windows>SIZE_MAX/per) return -1;
+    total=windows*per;
+    if (total>SIZE_MAX/sizeof(*results)) return -1;
+    memset(results,0,total*sizeof(*results));
+    for (w=0;w<windows;++w) {
+        SubseqHashEditResult *window_results=results+w*per;
+        if (subseqhash_compute_all_edit_splits_i8(
+                s+w,n,total_edits,t,window_results)) {
+            subseqhash_edit_results_destroy(results,total);
+            return -1;
+        }
+        for (split=0;split<per;++split)
+            for (i=0;i<window_results[split].length;++i)
+                window_results[split].positions[i]+=w;
+    }
+    return 0;
+}
 int subseqhash_compute_all_edit_splits_i8_legacy(
+
     const uint8_t *s,size_t n,size_t total_edits,
     const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
     return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,0);

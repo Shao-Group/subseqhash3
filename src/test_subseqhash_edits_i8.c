@@ -69,8 +69,40 @@ static void brute_positions(const uint8_t *s,size_t n,size_t k,size_t at,
     }
 }
 
+static void test_long_windows(void) {
+    const size_t N=8,n=5,E=2,per=E+1,windows=N-n+1;
+    uint8_t s[8]={0,1,2,3,1,0,2,3};
+    SubseqHashI8Tables tables;
+    SubseqHashEditResult actual[12],expected[3];
+    size_t w,split,i;
+    assert(!subseqhash_i8_tables_init(&tables,n,32,777));
+    assert(!subseqhash_compute_long_edits_i8(
+        s,N,n,E,&tables,actual));
+    for (w=0;w<windows;++w) {
+        assert(!subseqhash_compute_all_edit_splits_i8(
+            s+w,n,E,&tables,expected));
+        for (split=0;split<per;++split) {
+            const SubseqHashEditResult *a=actual+w*per+split;
+            const SubseqHashEditResult *e=expected+split;
+            assert(a->deletions==e->deletions);
+            assert(a->substitutions==e->substitutions);
+            assert(a->length==e->length);
+            assert(a->psi==e->psi);
+            assert(a->omega==e->omega);
+            assert(!memcmp(a->seed,e->seed,a->length));
+            assert(!memcmp(a->substituted,e->substituted,a->length));
+            for (i=0;i<a->length;++i)
+                assert(a->positions[i]==e->positions[i]+w);
+        }
+        subseqhash_edit_results_destroy(expected,per);
+    }
+    subseqhash_edit_results_destroy(actual,windows*per);
+    subseqhash_i8_tables_destroy(&tables);
+}
 int main(void) {
+
     size_t trial;
+    test_long_windows();
     for (trial=0;trial<100;++trial) {
         const size_t n=3+trial%5,edits=trial%3,d=3+trial%13;
         uint8_t s[7]; size_t i,split;
