@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <time.h>
 
 static double seconds(void) {
@@ -12,89 +11,65 @@ static double seconds(void) {
     clock_gettime(CLOCK_MONOTONIC,&t);
     return (double)t.tv_sec+(double)t.tv_nsec*1e-9;
 }
+
 static int parse_size(const char *text,size_t *value) {
-    char *end; unsigned long long x;
-    errno=0; x=strtoull(text,&end,10);
-    if (errno || !*text || *end || x>(unsigned long long)SIZE_MAX) return -1;
-    *value=(size_t)x; return 0;
+    char *end;
+    unsigned long long parsed;
+    errno=0;
+    parsed=strtoull(text,&end,10);
+    if (errno || !*text || *end || parsed>(unsigned long long)SIZE_MAX)
+        return -1;
+    *value=(size_t)parsed;
+    return 0;
 }
+
 int main(int argc,char **argv) {
-    size_t n=50,edits=10,d=31,repeats=100,rep,i,split;
-    uint8_t *s; double t0,t1,t2,t3,t4;
-    SubseqHashI8Tables compact;
-    SubseqHashTables reference;
+    size_t n=50,edits=10,d=32,repeats=100,rep,i;
+    uint8_t *sequence=NULL;
+    SubseqHashEditResult *results=NULL;
+    SubseqHashI8Tables tables={0};
+    double begin,end;
+    int status=EXIT_FAILURE;
+
     if ((argc>1&&parse_size(argv[1],&n)) ||
         (argc>2&&parse_size(argv[2],&edits)) ||
         (argc>3&&parse_size(argv[3],&d)) ||
         (argc>4&&parse_size(argv[4],&repeats)) ||
-        argc>5 || !d || !repeats || edits>n || edits>=32) {
+        argc>5 || !d || !repeats || edits>n || edits==SIZE_MAX) {
         fprintf(stderr,"usage: %s [n [edits [D [repeats]]]]\n",argv[0]);
         return EXIT_FAILURE;
     }
-    s=malloc(n?n:1);
-    if (!s || subseqhash_i8_tables_init(
-            &compact,n,d,UINT64_C(0x123456789abcdef0)) ||
-        subseqhash_i8_tables_make_double(&compact,&reference)) {
-        fputs("allocation failed\n",stderr); return EXIT_FAILURE;
+    sequence=malloc(n?n:1);
+    results=calloc(edits+1,sizeof(*results));
+    if (!sequence || !results || subseqhash_i8_tables_init(
+            &tables,n,d,UINT64_C(0x123456789abcdef0))) {
+        fputs("allocation failed\n",stderr);
+        goto done;
     }
-    for (i=0;i<n;++i) s[i]=(uint8_t)((i*13+i*i*7+1)%4);
-    t0=seconds();
+    for (i=0;i<n;++i)
+        sequence[i]=(uint8_t)((i*13+i*i*7+1)%4);
+
+    if (subseqhash_compute_all_edit_splits_i8(
+            sequence,n,edits,&tables,results)) goto done;
+    subseqhash_edit_results_destroy(results,edits+1);
+
+    begin=seconds();
     for (rep=0;rep<repeats;++rep) {
-        SubseqHashEditResult result[32];
-        if (subseqhash_compute_all_edit_splits(
-                s,n,edits,&reference,result)) return EXIT_FAILURE;
-        subseqhash_edit_results_destroy(result,edits+1);
-    }
-    t1=seconds();
-    for (rep=0;rep<repeats;++rep) {
-        SubseqHashEditResult result[32];
-        if (subseqhash_compute_all_edit_splits_i8_legacy(
-                s,n,edits,&compact,result)) return EXIT_FAILURE;
-        subseqhash_edit_results_destroy(result,edits+1);
-    }
-    t2=seconds();
-    for (rep=0;rep<repeats;++rep) {
-        SubseqHashEditResult result[32];
         if (subseqhash_compute_all_edit_splits_i8(
-                s,n,edits,&compact,result)) return EXIT_FAILURE;
-        subseqhash_edit_results_destroy(result,edits+1);
+                sequence,n,edits,&tables,results)) goto done;
+        subseqhash_edit_results_destroy(results,edits+1);
     }
-    t3=seconds();
-    for (rep=0;rep<repeats;++rep) {
-        SubseqHashEditResult result[32];
-        if (subseqhash_compute_all_edit_splits_i8_twopass(
-                s,n,edits,&compact,result)) return EXIT_FAILURE;
-        subseqhash_edit_results_destroy(result,edits+1);
-    }
-    t4=seconds();
-    {
-        SubseqHashEditResult a[32],b[32];
-        if (subseqhash_compute_all_edit_splits(s,n,edits,&reference,a) ||
-            subseqhash_compute_all_edit_splits_i8(s,n,edits,&compact,b))
-            return EXIT_FAILURE;
-        for (split=0;split<=edits;++split)
-            if (a[split].psi!=b[split].psi ||
-                a[split].omega!=b[split].omega ||
-                memcmp(a[split].seed,b[split].seed,a[split].length)) {
-                fputs("result mismatch\n",stderr); return EXIT_FAILURE;
-            }
-        subseqhash_edit_results_destroy(b,edits+1);
-        subseqhash_edit_results_destroy(a,edits+1);
-    }
+    end=seconds();
+
     printf("n=%zu edits=%zu D=%zu repeats=%zu backend=%s\n",
            n,edits,d,repeats,subseqhash_edits_i8_backend());
-    printf("double reference: %.6f s, %.6f s/call\n",
-           t1-t0,(t1-t0)/repeats);
-    printf("i8 legacy:       %.6f s, %.6f s/call\n",
-           t2-t1,(t2-t1)/repeats);
-    printf("i8 optimized:    %.6f s, %.6f s/call\n",
-           t3-t2,(t3-t2)/repeats);
-    printf("i8 two-pass:     %.6f s, %.6f s/call\n",
-           t4-t3,(t4-t3)/repeats);
-    printf("vs double:       %.2fx\n",(t1-t0)/(t3-t2));
-    printf("vs legacy i8:    %.2fx\n",(t2-t1)/(t3-t2));
-    printf("two-pass vs parent DP: %.2fx\n",(t3-t2)/(t4-t3));
-    subseqhash_tables_destroy(&reference);
-    subseqhash_i8_tables_destroy(&compact); free(s);
-    return EXIT_SUCCESS;
+    printf("elapsed: %.6f s, %.9f s/call\n",
+           end-begin,(end-begin)/(double)repeats);
+    status=EXIT_SUCCESS;
+done:
+    subseqhash_edit_results_destroy(results,edits==SIZE_MAX?0:edits+1);
+    subseqhash_i8_tables_destroy(&tables);
+    free(results);
+    free(sequence);
+    return status;
 }

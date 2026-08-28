@@ -19,16 +19,7 @@ int subseqhash_i8_tables_init(SubseqHashI8Tables *tables,
                                uint64_t seed);
 void subseqhash_i8_tables_destroy(SubseqHashI8Tables *tables);
 
-/* Construct an exactly equivalent double table for reference comparisons. */
-int subseqhash_i8_tables_make_double(const SubseqHashI8Tables *source,
-                                      SubseqHashTables *destination);
-
 int subseqhash_compute_all_edit_splits_i8(
-    const uint8_t *s, size_t n, size_t total_edits,
-    const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
-
-/* Same DP using the pre-aligned-kernel split-wrap implementation. */
-int subseqhash_compute_all_edit_splits_i8_legacy(
     const uint8_t *s, size_t n, size_t total_edits,
     const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
 
@@ -36,20 +27,11 @@ int subseqhash_compute_all_edit_splits_i8_legacy(
    Results are window-major and then substitution count 0..E. Positions are
    absolute offsets in sequence. The caller supplies
    (sequence_length-window_length+1)*(E+1) result entries. */
-int subseqhash_compute_long_edits_i8(
-    const uint8_t *sequence,size_t sequence_length,size_t window_length,
-    size_t total_edits,const SubseqHashI8Tables *tables,
-    SubseqHashEditResult *results);
-
 /* Single-threaded long-window implementation with reusable DP workspace. */
 int subseqhash_compute_long_edits_i8_fast(
     const uint8_t *sequence,size_t sequence_length,size_t window_length,
     size_t total_edits,const SubseqHashI8Tables *tables,
     SubseqHashEditResult *results);
-int subseqhash_compute_all_edit_splits_i8_twopass(
-    const uint8_t *s, size_t n, size_t total_edits,
-    const SubseqHashI8Tables *tables, SubseqHashEditResult *results);
-
 const char *subseqhash_edits_i8_backend(void);
 
 #endif

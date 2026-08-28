@@ -2,7 +2,6 @@
 #include "subseqhash_edits_i8.h"
 
 #include <limits.h>
-#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -101,25 +100,6 @@ void subseqhash_i8_tables_destroy(SubseqHashI8Tables *t) {
     free(t->C); free(t->wrap_indices); free(t->B1_masks); free(t->signed_A);
     free(t->B2); free(t->B1); free(t->A);
     memset(t,0,sizeof(*t));
-}
-
-int subseqhash_i8_tables_make_double(const SubseqHashI8Tables *s,
-                                      SubseqHashTables *d) {
-    size_t cells,i;
-    if (!s || !d || !s->d || s->k>SIZE_MAX/s->d ||
-        s->k*s->d>SIZE_MAX/4) return -1;
-    cells=s->k*s->d*4;
-    memset(d,0,sizeof(*d)); d->k=s->k; d->d=s->d;
-    d->A=malloc((cells?cells:1)*sizeof(*d->A));
-    d->B1=malloc(cells?cells:1); d->B2=malloc(cells?cells:1);
-    d->C=malloc((s->k?s->k*4:1)*sizeof(*d->C));
-    if (!d->A || !d->B1 || !d->B2 || !d->C) {
-        subseqhash_tables_destroy(d); return -1;
-    }
-    for (i=0;i<cells;++i) d->A[i]=(double)s->A[i];
-    memcpy(d->B1,s->B1,cells); memcpy(d->B2,s->B2,cells);
-    memcpy(d->C,s->C,s->k*4*sizeof(*d->C));
-    return 0;
 }
 
 #if !HAVE_AVX512_I8_DP || !defined(__AVX512VL__)
@@ -633,13 +613,12 @@ static void update_shifted(const int16_t *src_mn,const int16_t *src_mx,
                            const int8_t *B2,const int8_t *signed_A,
                            const uint32_t *B1_masks,const uint16_t *wrap_indices,
                            uint8_t *decision,
-                           size_t d,size_t shift,unsigned symbol,int use_aligned) {
+                           size_t d,size_t shift,unsigned symbol) {
     (void)signed_A;
     (void)B1_masks;
     (void)wrap_indices;
-    (void)use_aligned;
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
-    if (use_aligned && !(d&31u)) {
+    if (!(d&31u)) {
         update_avx512_aligned(src_mn,src_mx,dst_mn,dst_mx,signed_A,
                               B1_masks,wrap_indices,decision,d,shift,symbol,
                               NULL,NULL,0);
@@ -693,7 +672,7 @@ static void i8_workspace_destroy(I8DPWorkspace *workspace) {
 
 static int compute_all_edit_splits_i8_impl(
     const uint8_t *s,size_t n,size_t total_edits,
-    const SubseqHashI8Tables *t,SubseqHashEditResult *results,int use_aligned,
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results,
     I8DPWorkspace *workspace) {
     size_t d,e_count,state_count,score_stride,score_band,score_bytes;
     size_t band,parent_states;
@@ -710,7 +689,7 @@ static int compute_all_edit_splits_i8_impl(
     state_count=e_count*(e_count+1)/2;
     score_stride=d;
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
-    if (use_aligned && !(d&31u)) {
+    if (!(d&31u)) {
         if (d>SIZE_MAX-32) return -1;
         score_stride=d+32;
     }
@@ -756,7 +735,7 @@ static int compute_all_edit_splits_i8_impl(
         const size_t deletion_h_count=previous_max_h<total_edits?
             previous_max_h+1:total_edits;
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
-        if (use_aligned && !(d&31u)) {
+        if (!(d&31u)) {
             /* Visit each destination once.  Substitution candidates precede
                the original-symbol candidate exactly as in the source-centric
                traversal, preserving strict-comparison tie breaking. */
@@ -891,11 +870,11 @@ static int compute_all_edit_splits_i8_impl(
                         t->B2+table_base,t->signed_A+table_base,
                         t->B1_masks+(row*4+a)*t->blocks,t->wrap_indices,
                         parent+I8_PARENT(l,h,e,0),d,t->C[4*row+a],
-                        (unsigned)a,use_aligned);
+                        (unsigned)a);
                 }
                 if (e+h<total_edits) {
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
-                    if (use_aligned && !(d&31u)) {
+                    if (!(d&31u)) {
                         const int8_t *substitution_A[3];
                         const uint32_t *substitution_masks[3];
                         size_t substitution_shifts[3];
@@ -929,7 +908,7 @@ static int compute_all_edit_splits_i8_impl(
                             t->B2+table_base,t->signed_A+table_base,
                             t->B1_masks+(row*4+a)*t->blocks,
                             t->wrap_indices,parent+I8_PARENT(l,h,e+1,0),
-                            d,t->C[4*row+a],(unsigned)a,use_aligned);
+                            d,t->C[4*row+a],(unsigned)a);
                     }
                 }
             }
@@ -983,326 +962,10 @@ done:
 #undef I8_STATE
 }
 
-typedef struct {
-    uint32_t parent;
-    size_t position;
-    uint16_t length;
-    uint8_t symbol;
-} I8CanonicalNode;
-
-typedef struct {
-    uint32_t prefix;
-    size_t position;
-    uint8_t symbol;
-    uint8_t append;
-} I8CanonicalCandidate;
-
-typedef struct {
-    const uint8_t *s;
-    const SubseqHashI8Tables *tables;
-    const int16_t *snap_mn,*snap_mx;
-    size_t n,edits,ec,d,band,layers;
-    uint32_t *memo;
-    I8CanonicalNode *nodes;
-    size_t node_count,node_capacity;
-    uint8_t *seed_a,*seed_b;
-    size_t *positions_a,*positions_b;
-    int failed;
-} I8CanonicalContext;
-
-static size_t canonical_state(const I8CanonicalContext *c,size_t h,
-                              size_t e,size_t r) {
-    return ((h*c->ec+e)*c->d)+r;
-}
-static int16_t canonical_score(const I8CanonicalContext *c,int type,
-                               size_t l,size_t h,size_t e,size_t r) {
-    const size_t offset=l*c->band+canonical_state(c,h,e,r);
-    return type==1?c->snap_mn[offset]:c->snap_mx[offset];
-}
-static uint32_t canonical_add_node(I8CanonicalContext *c,uint32_t parent,
-                                   uint8_t symbol,size_t position) {
-    I8CanonicalNode *grown;
-    uint32_t id;
-    if (c->node_count>=UINT32_MAX) { c->failed=1; return 0; }
-    if (c->node_count==c->node_capacity) {
-        size_t capacity=c->node_capacity?c->node_capacity*2:1024;
-        if (capacity<c->node_capacity ||
-            capacity>SIZE_MAX/sizeof(*c->nodes)) {
-            c->failed=1; return 0;
-        }
-        grown=realloc(c->nodes,capacity*sizeof(*c->nodes));
-        if (!grown) { c->failed=1; return 0; }
-        c->nodes=grown; c->node_capacity=capacity;
-    }
-    id=(uint32_t)c->node_count++;
-    c->nodes[id].parent=parent;
-    c->nodes[id].position=position;
-    c->nodes[id].symbol=symbol;
-    c->nodes[id].length=(uint16_t)(c->nodes[parent].length+1u);
-    return id;
-}
-static size_t canonical_materialize(const I8CanonicalContext *c,
-                                    I8CanonicalCandidate candidate,
-                                    uint8_t *seed,size_t *positions) {
-    uint32_t node=candidate.prefix;
-    size_t length=c->nodes[node].length+(size_t)candidate.append;
-    size_t cursor=length;
-    if (candidate.append) {
-        seed[--cursor]=candidate.symbol;
-        positions[cursor]=candidate.position;
-    }
-    while (node!=1u) {
-        seed[--cursor]=c->nodes[node].symbol;
-        positions[cursor]=c->nodes[node].position;
-        node=c->nodes[node].parent;
-    }
-    return length;
-}
-static int canonical_candidate_less(I8CanonicalContext *c,
-                                    I8CanonicalCandidate a,
-                                    I8CanonicalCandidate b) {
-    size_t length_a=canonical_materialize(
-        c,a,c->seed_a,c->positions_a);
-    size_t length_b=canonical_materialize(
-        c,b,c->seed_b,c->positions_b);
-    size_t i,length=length_a<length_b?length_a:length_b;
-    for (i=0;i<length;++i)
-        if (c->seed_a[i]!=c->seed_b[i])
-            return c->seed_a[i]<c->seed_b[i];
-    if (length_a!=length_b) return length_a<length_b;
-    for (i=0;i<length;++i)
-        if (c->positions_a[i]!=c->positions_b[i])
-            return c->positions_a[i]<c->positions_b[i];
-    return 0;
-}
-
-static uint32_t canonical_witness(I8CanonicalContext *c,int type,size_t l,
-                                  size_t h,size_t e,size_t r) {
-    const size_t state=canonical_state(c,h,e,r);
-    const size_t memo_offset=((size_t)(type-1)*c->layers+l)*c->band+state;
-    const int16_t target=canonical_score(c,type,l,h,e,r);
-    I8CanonicalCandidate best={0,0,0,0};
-    int have_best=0;
-    unsigned symbol;
-    uint32_t cached=c->memo[memo_offset];
-    if (cached) return cached;
-    if (!l) {
-        if (!h && !e && !r && target==0) return 1u;
-        return 0;
-    }
-    if (h && canonical_score(c,type,l-1,h-1,e,r)==target) {
-        uint32_t prefix=canonical_witness(c,type,l-1,h-1,e,r);
-        if (prefix) {
-            best.prefix=prefix; best.append=0; have_best=1;
-        }
-    }
-    {
-        const size_t original=c->s[l-1],row=(l-1)-h;
-        for (symbol=0;symbol<4;++symbol) {
-            const size_t changed=symbol!=original;
-            size_t previous_r,base;
-            int previous_type;
-            int16_t previous,add,candidate_score;
-            I8CanonicalCandidate candidate;
-            uint32_t prefix;
-            if (changed>e || row>=c->tables->k) continue;
-            previous_r=subtract_mod(
-                r,c->tables->C[4*row+symbol],c->d);
-            base=(row*4+symbol)*c->d+r;
-            add=c->tables->signed_A[base];
-            if (type==1) {
-                previous_type=c->tables->B1[base]>0?1:2;
-                previous=canonical_score(c,previous_type,l-1,h,
-                                         e-changed,previous_r);
-                if (previous_type==1) candidate_score=(int16_t)(previous+add);
-                else candidate_score=(int16_t)(-previous+add);
-            } else {
-                previous_type=c->tables->B1[base]>0?2:1;
-                previous=canonical_score(c,previous_type,l-1,h,
-                                         e-changed,previous_r);
-                if (previous_type==2) candidate_score=(int16_t)(previous+add);
-                else candidate_score=(int16_t)(-previous+add);
-            }
-            if ((previous_type==1 && previous==I8_POSITIVE_INFINITY) ||
-                (previous_type==2 && previous==I8_NEGATIVE_INFINITY) ||
-                candidate_score!=target) continue;
-            prefix=canonical_witness(c,previous_type,l-1,h,e-changed,
-                                     previous_r);
-            if (!prefix) continue;
-            candidate.prefix=prefix; candidate.position=l-1;
-            candidate.symbol=(uint8_t)symbol; candidate.append=1;
-            if (!have_best || canonical_candidate_less(c,candidate,best)) {
-                best=candidate; have_best=1;
-            }
-        }
-    }
-    if (!have_best) return 0;
-    if (best.append)
-        cached=canonical_add_node(c,best.prefix,best.symbol,best.position);
-    else cached=best.prefix;
-    if (!cached) return 0;
-    c->memo[memo_offset]=cached;
-    return cached;
-}
-
-int subseqhash_compute_all_edit_splits_i8_twopass(
-    const uint8_t *s,size_t n,size_t total_edits,
-    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
-    size_t d,ec,band,layers,layer_cells,l,h,e,q,r,a,result_index;
-    int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
-    int16_t *snapshots=NULL,*snap_mn,*snap_mx;
-    I8CanonicalContext canonical={0};
-    int status=-1;
-    if (!t || !results || !t->d || t->k<n || total_edits>n ||
-        (n&&!s)) return -1;
-    d=t->d; ec=total_edits+1; layers=n+1;
-    if (!ec || ec>SIZE_MAX/sizeof(*results) || ec>SIZE_MAX/ec ||
-        ec*ec>SIZE_MAX/d) return -1;
-    band=ec*ec*d;
-    if (band>SIZE_MAX/(4*sizeof(*scores)) || layers>SIZE_MAX/band ||
-        layers*band>SIZE_MAX/(2*sizeof(*snapshots)) ||
-        layers*band>SIZE_MAX/(2*sizeof(*canonical.memo))) return -1;
-    layer_cells=layers*band;
-    memset(results,0,ec*sizeof(*results));
-    scores=malloc(4*band*sizeof(*scores));
-    snapshots=malloc(2*layer_cells*sizeof(*snapshots));
-    if (!scores || !snapshots) goto done;
-    old_mn=scores; old_mx=old_mn+band;
-    new_mn=old_mx+band; new_mx=new_mn+band;
-    snap_mn=snapshots; snap_mx=snapshots+layer_cells;
-    canonical.s=s; canonical.tables=t; canonical.snap_mn=snap_mn;
-    canonical.snap_mx=snap_mx; canonical.n=n; canonical.edits=total_edits;
-    canonical.ec=ec; canonical.d=d; canonical.band=band;
-    canonical.layers=layers; canonical.node_capacity=1024;
-    canonical.node_count=2;
-    canonical.memo=calloc(2*layer_cells,sizeof(*canonical.memo));
-    canonical.nodes=calloc(canonical.node_capacity,sizeof(*canonical.nodes));
-    canonical.seed_a=malloc(n?n:1); canonical.seed_b=malloc(n?n:1);
-    canonical.positions_a=malloc((n?n:1)*sizeof(*canonical.positions_a));
-    canonical.positions_b=malloc((n?n:1)*sizeof(*canonical.positions_b));
-    if (!canonical.memo || !canonical.nodes || !canonical.seed_a ||
-        !canonical.seed_b || !canonical.positions_a ||
-        !canonical.positions_b) goto done;
-    memset(old_mn,0x7f,band*sizeof(*old_mn));
-    memset(new_mn,0x7f,band*sizeof(*new_mn));
-    memset(old_mx,0x80,band*sizeof(*old_mx));
-    memset(new_mx,0x80,band*sizeof(*new_mx));
-#define TP_STATE(H,E,R) ((((H)*ec+(E))*d)+(R))
-#define TP_MN(L,H,E,R) snap_mn[(L)*band+TP_STATE(H,E,R)]
-#define TP_MX(L,H,E,R) snap_mx[(L)*band+TP_STATE(H,E,R)]
-    old_mn[0]=old_mx[0]=0;
-    memcpy(snap_mn,old_mn,band*sizeof(*old_mn));
-    memcpy(snap_mx,old_mx,band*sizeof(*old_mx));
-    for (l=1;l<=n;++l) {
-        const size_t original=s[l-1];
-        const size_t previous_max_h=(l-1)<total_edits?
-            (l-1):total_edits;
-        if (original>3) goto done;
-        memset(new_mn,0x7f,band*sizeof(*new_mn));
-        memset(new_mx,0x80,band*sizeof(*new_mx));
-        for (h=0;h<=previous_max_h && h<total_edits;++h)
-            for (e=0;e+h+1<=total_edits;++e) {
-                size_t src=TP_STATE(h,e,0),dst=TP_STATE(h+1,e,0);
-                memcpy(new_mn+dst,old_mn+src,d*sizeof(*new_mn));
-                memcpy(new_mx+dst,old_mx+src,d*sizeof(*new_mx));
-            }
-        for (h=0;h<=previous_max_h;++h) {
-            const size_t row=(l-1)-h;
-            for (e=0;e+h<=total_edits;++e) for (a=0;a<4;++a) {
-                const size_t changed=a!=original;
-                const size_t table_base=(row*4+a)*d;
-                if (e+h+changed>total_edits) continue;
-                update_shifted(old_mn+TP_STATE(h,e,0),
-                    old_mx+TP_STATE(h,e,0),
-                    new_mn+TP_STATE(h,e+changed,0),
-                    new_mx+TP_STATE(h,e+changed,0),
-                    t->A+table_base,t->B1+table_base,t->B2+table_base,
-                    t->signed_A+table_base,
-                    t->B1_masks+(row*4+a)*t->blocks,t->wrap_indices,
-                    NULL,d,t->C[4*row+a],(unsigned)a,1);
-            }
-        }
-        { int16_t *tmp=old_mn; old_mn=new_mn; new_mn=tmp;
-          tmp=old_mx; old_mx=new_mx; new_mx=tmp; }
-        memcpy(snap_mn+l*band,old_mn,band*sizeof(*old_mn));
-        memcpy(snap_mx+l*band,old_mx,band*sizeof(*old_mx));
-    }
-    for (result_index=0;result_index<ec;++result_index) {
-        SubseqHashEditResult *out=results+result_index;
-        size_t substitutions=result_index;
-        size_t deletions=total_edits-substitutions,k=n-deletions;
-        int type;
-        out->deletions=deletions; out->substitutions=substitutions;
-        out->length=k; out->seed=malloc(k?k:1);
-        out->positions=malloc((k?k:1)*sizeof(*out->positions));
-        out->substituted=malloc(k?k:1);
-        if (!out->seed || !out->positions || !out->substituted) goto done;
-        for (r=0;r<d && TP_MN(n,deletions,substitutions,r)==
-                         I8_POSITIVE_INFINITY;++r) {}
-        if (r==d) goto done;
-        out->psi=r;
-        type=llabs((long long)TP_MN(n,deletions,substitutions,r))>=
-             llabs((long long)TP_MX(n,deletions,substitutions,r))?1:2;
-        out->omega=(double)(type==1?
-            TP_MN(n,deletions,substitutions,r):
-            TP_MX(n,deletions,substitutions,r));
-        {
-            I8CanonicalCandidate whole;
-            uint32_t node=canonical_witness(&canonical,type,n,deletions,
-                                                substitutions,r);
-            size_t length;
-            if (!node || canonical.failed) goto done;
-            whole.prefix=node; whole.position=0; whole.symbol=0;
-            whole.append=0;
-            length=canonical_materialize(&canonical,whole,out->seed,
-                                         out->positions);
-            if (length!=k) goto done;
-            for (q=0;q<k;++q)
-                out->substituted[q]=(uint8_t)(
-                    out->seed[q]!=s[out->positions[q]]);
-        }
-    }
-    status=0;
-done:
-    if (status) subseqhash_edit_results_destroy(results,ec);
-    free(canonical.positions_b); free(canonical.positions_a);
-    free(canonical.seed_b); free(canonical.seed_a);
-    free(canonical.nodes); free(canonical.memo);
-    free(snapshots); free(scores); return status;
-#undef TP_MX
-#undef TP_MN
-#undef TP_STATE
-}
-
 int subseqhash_compute_all_edit_splits_i8(
     const uint8_t *s,size_t n,size_t total_edits,
     const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
-    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,1,NULL);
-}
-
-int subseqhash_compute_long_edits_i8(
-    const uint8_t *s,size_t N,size_t n,size_t total_edits,
-    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
-    size_t windows,per,total,w,split,i;
-    if (!t || !results || !n || n>N || total_edits>n || !t->d ||
-        t->k<n || (N&&!s) || total_edits==SIZE_MAX) return -1;
-    windows=N-n+1; per=total_edits+1;
-    if (windows>SIZE_MAX/per) return -1;
-    total=windows*per;
-    if (total>SIZE_MAX/sizeof(*results)) return -1;
-    memset(results,0,total*sizeof(*results));
-    for (w=0;w<windows;++w) {
-        SubseqHashEditResult *window_results=results+w*per;
-        if (subseqhash_compute_all_edit_splits_i8(
-                s+w,n,total_edits,t,window_results)) {
-            subseqhash_edit_results_destroy(results,total);
-            return -1;
-        }
-        for (split=0;split<per;++split)
-            for (i=0;i<window_results[split].length;++i)
-                window_results[split].positions[i]+=w;
-    }
-    return 0;
+    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,NULL);
 }
 
 int subseqhash_compute_long_edits_i8_fast(
@@ -1321,7 +984,7 @@ int subseqhash_compute_long_edits_i8_fast(
     for (w=0;w<windows;++w) {
         SubseqHashEditResult *window_results=results+w*per;
         if (compute_all_edit_splits_i8_impl(
-                s+w,n,total_edits,t,window_results,1,&workspace)) goto done;
+                s+w,n,total_edits,t,window_results,&workspace)) goto done;
         for (split=0;split<per;++split)
             for (i=0;i<window_results[split].length;++i)
                 window_results[split].positions[i]+=w;
@@ -1332,13 +995,6 @@ done:
     i8_workspace_destroy(&workspace);
     return status;
 }
-int subseqhash_compute_all_edit_splits_i8_legacy(
-
-    const uint8_t *s,size_t n,size_t total_edits,
-    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
-    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,0,NULL);
-}
-
 const char *subseqhash_edits_i8_backend(void) {
 #if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
     return "AVX-512BW (32 x int16 states; padded circular loads)";
