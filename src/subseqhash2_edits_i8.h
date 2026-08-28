@@ -8,6 +8,8 @@ typedef struct {
     size_t k, d;
     int8_t *AF, *BF1, *BF2;
     int8_t *AR, *BR1, *BR2;
+    /* Precombined A*B2 values used by the AVX-512 DP kernel. */
+    int8_t *SAF, *SAR;
     int8_t *AP, *BP1, *BP2;
     size_t *CF, *CR, *CP;
 } SubseqHash2I8Tables;

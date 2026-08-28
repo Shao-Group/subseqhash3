@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int parse_size(const char *text,size_t *value) {
     char *end; unsigned long long parsed;
@@ -95,6 +96,7 @@ done:
 
 int main(int argc,char **argv) {
     FILE *input=NULL,*output=NULL; char *line=NULL; size_t capacity=0;
+    struct timespec start_time,end_time;
     ssize_t got; size_t W,E,D,mode,sequence_index=0; int status=EXIT_FAILURE;
     SubseqHash2I8Tables tables;
     memset(&tables,0,sizeof(tables));
@@ -106,6 +108,9 @@ int main(int argc,char **argv) {
     }
     input=fopen(argv[1],"r");
     if (!input) { perror(argv[1]); goto done; }
+    if (clock_gettime(CLOCK_MONOTONIC,&start_time)) {
+        perror("clock_gettime"); goto done;
+    }
     output=fopen(argv[6],"w");
     if (!output) { perror(argv[6]); goto done; }
     if (subseqhash2_i8_tables_init(
@@ -128,6 +133,12 @@ int main(int argc,char **argv) {
     }
     if (ferror(input)) { perror(argv[1]); goto done; }
     if (fflush(output)) { perror(argv[6]); goto done; }
+    if (clock_gettime(CLOCK_MONOTONIC,&end_time)) {
+        perror("clock_gettime"); goto done;
+    }
+    fprintf(stderr,"elapsed time: %.6f seconds\n",
+            (double)(end_time.tv_sec-start_time.tv_sec)+
+            (double)(end_time.tv_nsec-start_time.tv_nsec)/1000000000.0);
     status=EXIT_SUCCESS;
 done:
     free(line); subseqhash2_i8_tables_destroy(&tables);

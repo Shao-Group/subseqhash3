@@ -84,9 +84,11 @@ static void validate_result(const uint8_t *x,size_t start,size_t n,
 }
 
 int main(void) {
+    static const size_t residues[]={1,2,3,7,15,31,32,33,63,64,65,127};
     size_t trial;
-    for (trial=0;trial<20;++trial) {
-        const size_t N=5+trial%2,n=3+trial%2,E=trial%3,d=3+trial%5;
+    for (trial=0;trial<60;++trial) {
+        const size_t N=5+trial%2,n=3+trial%2,E=trial%3;
+        const size_t d=residues[trial%(sizeof(residues)/sizeof(residues[0]))];
         size_t windows=N-n+1,per=subseqhash2_i8_results_per_window(n,E);
         size_t total=windows*per,w,index=0,s,order,i;
         uint8_t x[6]; SubseqHash2I8Tables tables;

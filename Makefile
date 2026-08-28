@@ -74,6 +74,7 @@ simd: clean-simd
 		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i16 \
 		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/test_subseqhash2_edits_i8 \
+		$(SIMD_BUILD_DIR)/generate_subseqhash2_seeds \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i16 \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_i16_collisions \
@@ -325,6 +326,7 @@ clean-simd:
 		$(SIMD_BUILD_DIR)/test_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/test_subseqhash2_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i16 \
+		$(SIMD_BUILD_DIR)/generate_subseqhash2_seeds \
 		$(SIMD_BUILD_DIR)/benchmark_subseqhash_edits_i8 \
 		$(SIMD_BUILD_DIR)/benchmark_i16_collisions \
 		$(SIMD_BUILD_DIR)/benchmark_i8_collisions \
