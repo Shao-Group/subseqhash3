@@ -68,3 +68,9 @@ Extend the scoring to consider adjacent letters
 this includes the extension of A, B, and C tables.
 Its corresponding DP should be adjusted accordingly too.
 write down the tables, definition of psi and omega, DP subproblems, and recurrences into a latex document, doc/main.tex
+
+
+rename and re-organize the files/functions. first, the project is named "subseqhash3", so you might want to rename the main thing
+  subseqhash_edits_i8 as subseqhash3; compile everything into only one binary, which can carry multiple functions; for examples: "subseqhash3
+  simulate ..." which simulate pairs of strings; "subseqhash3 seeds ..." which generate seeds; "subseqhash3 collisions ..." which estimate
+  probability of hash-collision using the input files; "subseqhash3 test ..." which does some tests; show me your plan before conducting changes
