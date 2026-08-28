@@ -73,15 +73,18 @@ static void test_long_windows(void) {
     const size_t N=8,n=5,E=2,per=E+1,windows=N-n+1;
     uint8_t s[8]={0,1,2,3,1,0,2,3};
     SubseqHashI8Tables tables;
-    SubseqHashEditResult actual[12],expected[3];
+    SubseqHashEditResult actual[12],fast[12],expected[3];
     size_t w,split,i;
     assert(!subseqhash_i8_tables_init(&tables,n,32,777));
     assert(!subseqhash_compute_long_edits_i8(
         s,N,n,E,&tables,actual));
+    assert(!subseqhash_compute_long_edits_i8_fast(
+        s,N,n,E,&tables,fast));
     for (w=0;w<windows;++w) {
         assert(!subseqhash_compute_all_edit_splits_i8(
             s+w,n,E,&tables,expected));
         for (split=0;split<per;++split) {
+            const SubseqHashEditResult *f=fast+w*per+split;
             const SubseqHashEditResult *a=actual+w*per+split;
             const SubseqHashEditResult *e=expected+split;
             assert(a->deletions==e->deletions);
@@ -90,6 +93,15 @@ static void test_long_windows(void) {
             assert(a->psi==e->psi);
             assert(a->omega==e->omega);
             assert(!memcmp(a->seed,e->seed,a->length));
+            assert(f->deletions==a->deletions);
+            assert(f->substitutions==a->substitutions);
+            assert(f->length==a->length);
+            assert(f->psi==a->psi);
+            assert(f->omega==a->omega);
+            assert(!memcmp(f->seed,a->seed,a->length));
+            assert(!memcmp(f->positions,a->positions,
+                           a->length*sizeof(*a->positions)));
+            assert(!memcmp(f->substituted,a->substituted,a->length));
             assert(!memcmp(a->substituted,e->substituted,a->length));
             for (i=0;i<a->length;++i)
                 assert(a->positions[i]==e->positions[i]+w);
@@ -97,6 +109,7 @@ static void test_long_windows(void) {
         subseqhash_edit_results_destroy(expected,per);
     }
     subseqhash_edit_results_destroy(actual,windows*per);
+    subseqhash_edit_results_destroy(fast,windows*per);
     subseqhash_i8_tables_destroy(&tables);
 }
 int main(void) {

@@ -41,6 +41,11 @@ int subseqhash_compute_long_edits_i8(
     size_t total_edits,const SubseqHashI8Tables *tables,
     SubseqHashEditResult *results);
 
+/* Single-threaded long-window implementation with reusable DP workspace. */
+int subseqhash_compute_long_edits_i8_fast(
+    const uint8_t *sequence,size_t sequence_length,size_t window_length,
+    size_t total_edits,const SubseqHashI8Tables *tables,
+    SubseqHashEditResult *results);
 int subseqhash_compute_all_edit_splits_i8_twopass(
     const uint8_t *s, size_t n, size_t total_edits,
     const SubseqHashI8Tables *tables, SubseqHashEditResult *results);

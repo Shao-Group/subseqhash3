@@ -517,9 +517,40 @@ static void update_shifted(const int16_t *src_mn,const int16_t *src_mx,
 #undef UPDATE_RANGE
 }
 
+typedef struct {
+    int16_t *scores;
+    uint8_t *parent;
+    size_t score_cells,parent_cells;
+} I8DPWorkspace;
+
+static int i8_workspace_reserve(I8DPWorkspace *workspace,
+                                size_t score_cells,size_t parent_cells) {
+    int16_t *scores;
+    uint8_t *parent;
+    if (score_cells>workspace->score_cells) {
+        scores=aligned_allocate(64,score_cells*sizeof(*scores));
+        if (!scores) return -1;
+        free(workspace->scores); workspace->scores=scores;
+        workspace->score_cells=score_cells;
+    }
+    if (parent_cells>workspace->parent_cells) {
+        parent=aligned_allocate(64,parent_cells?parent_cells:1);
+        if (!parent) return -1;
+        free(workspace->parent); workspace->parent=parent;
+        workspace->parent_cells=parent_cells;
+    }
+    return 0;
+}
+
+static void i8_workspace_destroy(I8DPWorkspace *workspace) {
+    free(workspace->parent); free(workspace->scores);
+    memset(workspace,0,sizeof(*workspace));
+}
+
 static int compute_all_edit_splits_i8_impl(
     const uint8_t *s,size_t n,size_t total_edits,
-    const SubseqHashI8Tables *t,SubseqHashEditResult *results,int use_aligned) {
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results,int use_aligned,
+    I8DPWorkspace *workspace) {
     size_t d,e_count,band,parent_states,l,h,e,q,r,a,result_index;
     int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
     uint8_t *parent=NULL;
@@ -536,13 +567,18 @@ static int compute_all_edit_splits_i8_impl(
     parent_states=n*band;
     memset(results,0,e_count*sizeof(*results));
     for (l=0;l<n;++l) if (s[l]>3) return -1;
-    scores=aligned_allocate(64,4*band*sizeof(*scores));
-    parent=aligned_allocate(64,parent_states?parent_states:1);
-    if (!scores || !parent) goto done;
+    if (workspace) {
+        if (i8_workspace_reserve(workspace,4*band,parent_states)) goto done;
+        scores=workspace->scores; parent=workspace->parent;
+    } else {
+        scores=aligned_allocate(64,4*band*sizeof(*scores));
+        parent=aligned_allocate(64,parent_states?parent_states:1);
+        if (!scores || !parent) goto done;
+    }
     memset(parent,0,parent_states?parent_states:1);
     old_mn=scores; old_mx=old_mn+band;
     new_mn=old_mx+band; new_mx=new_mn+band;
-    /* At layer zero only (h,e)=(0,0) is reachable.  Every other state is
+    /* At layer zero only (h,e)=(0,0) is reachable. Every other state is
        initialized immediately before the first layer that can reach it. */
     memset(old_mn,0x7f,d*sizeof(*old_mn));
     memset(old_mx,0x80,d*sizeof(*old_mx));
@@ -754,7 +790,8 @@ layer_complete:
     status=0;
 done:
     if (status) subseqhash_edit_results_destroy(results,e_count);
-    free(parent); free(scores); return status;
+    if (!workspace) { free(parent); free(scores); }
+    return status;
 #undef I8_PARENT
 #undef I8_STATE
 }
@@ -1053,7 +1090,7 @@ done:
 int subseqhash_compute_all_edit_splits_i8(
     const uint8_t *s,size_t n,size_t total_edits,
     const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
-    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,1);
+    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,1,NULL);
 }
 
 int subseqhash_compute_long_edits_i8(
@@ -1080,11 +1117,39 @@ int subseqhash_compute_long_edits_i8(
     }
     return 0;
 }
+
+int subseqhash_compute_long_edits_i8_fast(
+    const uint8_t *s,size_t N,size_t n,size_t total_edits,
+    const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
+    I8DPWorkspace workspace={0};
+    size_t windows,per,total,w,split,i;
+    int status=-1;
+    if (!t || !results || !n || n>N || total_edits>n || !t->d ||
+        t->k<n || (N&&!s) || total_edits==SIZE_MAX) return -1;
+    windows=N-n+1; per=total_edits+1;
+    if (windows>SIZE_MAX/per) return -1;
+    total=windows*per;
+    if (total>SIZE_MAX/sizeof(*results)) return -1;
+    memset(results,0,total*sizeof(*results));
+    for (w=0;w<windows;++w) {
+        SubseqHashEditResult *window_results=results+w*per;
+        if (compute_all_edit_splits_i8_impl(
+                s+w,n,total_edits,t,window_results,1,&workspace)) goto done;
+        for (split=0;split<per;++split)
+            for (i=0;i<window_results[split].length;++i)
+                window_results[split].positions[i]+=w;
+    }
+    status=0;
+done:
+    if (status) subseqhash_edit_results_destroy(results,total);
+    i8_workspace_destroy(&workspace);
+    return status;
+}
 int subseqhash_compute_all_edit_splits_i8_legacy(
 
     const uint8_t *s,size_t n,size_t total_edits,
     const SubseqHashI8Tables *t,SubseqHashEditResult *results) {
-    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,0);
+    return compute_all_edit_splits_i8_impl(s,n,total_edits,t,results,0,NULL);
 }
 
 const char *subseqhash_edits_i8_backend(void) {
