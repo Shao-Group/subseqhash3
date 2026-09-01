@@ -19,6 +19,17 @@ typedef struct {
     size_t n,es,ed,cells,words;
 } EditDfa;
 
+typedef struct { uint64_t high,low; } PermutationRank;
+
+typedef struct {
+    const EditDfa *dfa;
+    size_t length,repeats,count;
+    uint8_t *word;
+    PermutationRank *minimum;
+    uint64_t *minimum_high,*minimum_low;
+    int rank_words;
+} NeighborhoodVisitor;
+
 static size_t edit_cell(const EditDfa *a,size_t p,size_t d,size_t s) {
     return (p*(a->ed+1)+d)*(a->es+1)+s;
 }
@@ -115,6 +126,112 @@ static int init_dfa(EditDfa *a,const char *text,size_t es,size_t ed) {
     a->cells=(n+1)*(ed+1)*(es+1); a->words=(a->cells+63)/64; return 0;
 }
 
+static uint64_t mix64(uint64_t value) {
+    value=(value^(value>>30))*UINT64_C(0xbf58476d1ce4e5b9);
+    value=(value^(value>>27))*UINT64_C(0x94d049bb133111eb);
+    return value^(value>>31);
+}
+
+/* Return inverse P(word), where P is a keyed four-round Feistel permutation
+ * of the packed 128-bit DNA word.  Unlike a conventional hash, this mapping
+ * is one-to-one.  Zero padding is unambiguous at a fixed seed length. */
+static PermutationRank inverse_permutation(uint64_t high,uint64_t low,
+                                           uint64_t key) {
+    unsigned round;
+    for (round=4;round;--round) {
+        uint64_t previous_low=high;
+        uint64_t previous_high=low^mix64(
+            high^key^((uint64_t)(round-1)*UINT64_C(0x9e3779b97f4a7c15)));
+        high=previous_high; low=previous_low;
+    }
+    { PermutationRank result={high,low}; return result; }
+}
+
+static void pack_word(const uint8_t *word,size_t length,
+                      uint64_t *high,uint64_t *low) {
+    size_t i;
+    *high=0; *low=0;
+    for (i=0;i<length;++i) {
+        *high=(*high<<2)|(*low>>62);
+        *low=(*low<<2)|(uint64_t)word[i];
+    }
+}
+
+static int rank_less(PermutationRank a,PermutationRank b) {
+    return a.high<b.high || (a.high==b.high && a.low<b.low);
+}
+
+static int enumerate_visit(NeighborhoodVisitor *visitor,const uint64_t *state,
+                           size_t row) {
+    unsigned symbol;
+    if (row==visitor->length) {
+        if (bit_get(state,edit_cell(visitor->dfa,visitor->dfa->n,
+                                   visitor->dfa->ed,visitor->dfa->es))) {
+            ++visitor->count;
+            if (visitor->rank_words) {
+                uint64_t high,low; size_t repeat;
+                pack_word(visitor->word,visitor->length,&high,&low);
+                for (repeat=0;repeat<visitor->repeats;++repeat) {
+                    PermutationRank rank=inverse_permutation(
+                        high,low,UINT64_C(0x6a09e667f3bcc909)+
+                        repeat*UINT64_C(0x9e3779b97f4a7c15));
+                    if (rank_less(rank,visitor->minimum[repeat])) {
+                        visitor->minimum[repeat]=rank;
+                        visitor->minimum_high[repeat]=high;
+                        visitor->minimum_low[repeat]=low;
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+    for (symbol=0;symbol<4;++symbol) {
+        uint64_t *next=calloc(visitor->dfa->words,sizeof(*next));
+        int reachable;
+        if (!next) return -1;
+        reachable=dfa_step(visitor->dfa,state,symbol,next);
+        if (reachable) {
+            visitor->word[row]=(uint8_t)symbol;
+            if (enumerate_visit(visitor,next,row+1)) { free(next); return -1; }
+        }
+        free(next);
+    }
+    return 0;
+}
+
+static int visit_neighborhood(const char *text,size_t es,size_t ed,
+                              size_t repeats,int rank_words,size_t *count,
+                              uint64_t *selected_high,uint64_t *selected_low) {
+    EditDfa dfa; NeighborhoodVisitor visitor={0}; uint64_t *initial=NULL;
+    size_t repeat; int status=-1;
+    if (init_dfa(&dfa,text,es,ed) || dfa.n-dfa.ed>64) return -1;
+    visitor.dfa=&dfa; visitor.length=dfa.n-dfa.ed;
+    visitor.repeats=repeats; visitor.rank_words=rank_words;
+    visitor.word=malloc(visitor.length?visitor.length:1);
+    initial=calloc(dfa.words,sizeof(*initial));
+    if (!visitor.word || !initial) goto done;
+    if (rank_words) {
+        visitor.minimum=malloc(repeats*sizeof(*visitor.minimum));
+        visitor.minimum_high=selected_high; visitor.minimum_low=selected_low;
+        if (!visitor.minimum) goto done;
+        for (repeat=0;repeat<repeats;++repeat) {
+            visitor.minimum[repeat].high=UINT64_MAX;
+            visitor.minimum[repeat].low=UINT64_MAX;
+        }
+    }
+    bit_set(initial,edit_cell(&dfa,0,0,0)); deletion_closure(&dfa,initial);
+    if (enumerate_visit(&visitor,initial,0) || !visitor.count) goto done;
+    *count=visitor.count; status=0;
+done:
+    free(visitor.minimum); free(visitor.word); free(initial); return status;
+}
+
+int ssh3_edit_neighborhood_size(const char *text,size_t es,size_t ed,
+                                size_t *size) {
+    if (!text || !size) return -1;
+    return visit_neighborhood(text,es,ed,0,0,size,NULL,NULL);
+}
+
 double ssh3_edit_neighborhood_jaccard(const char *s,const char *t,size_t es,size_t ed) {
     EditDfa a,b; long double na,nb,intersection,union_size;
     if (!s || !t || init_dfa(&a,s,es,ed) || init_dfa(&b,t,es,ed)) return NAN;
@@ -150,6 +267,8 @@ static void help(FILE *stream) {
           "  R           Number of table sets and repeated trials.\n"
           "  TABLE_FILE  Optional reusable table file matching D and R.\n\n"
           "Only left/right edit splits producing equal-length seeds are compared.\n"
+          "Also runs exact inverse-permutation MinHash by enumerating distinct\n"
+          "neighbors (seed length <= 64), and reports separate benchmark times.\n"
           "If TABLE_FILE is omitted, new tables are written to PAIRS_FILE.ABC.\n",
           stream);
 }
@@ -239,7 +358,9 @@ static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
     FILE *input=fopen(filename,"r");
     char *line=NULL; size_t capacity=0,repeat,left_split,right_split;
     double pairs_sum=0,any_sum=0,all_sum=0,wall_sum=0,cpu_sum=0;
+    double enumeration_wall=0,minhash_wall=0,dp_wall=0;
     double *collisions=NULL,*denominators=NULL,*jaccard_sum=NULL,*jaccard_sq_sum=NULL;
+    double *inverse_collisions=NULL;
     int status=-1;
     if (!input) { perror(filename); return -1; }
     if (per>SIZE_MAX/per || per*per>SIZE_MAX/sizeof(*collisions)) goto done;
@@ -247,7 +368,9 @@ static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
     denominators=calloc(per*per,sizeof(*denominators));
     jaccard_sum=calloc(per,sizeof(*jaccard_sum));
     jaccard_sq_sum=calloc(per,sizeof(*jaccard_sq_sum));
-    if (!collisions || !denominators || !jaccard_sum || !jaccard_sq_sum) goto done;
+    inverse_collisions=calloc(per*per,sizeof(*inverse_collisions));
+    if (!collisions || !denominators || !jaccard_sum || !jaccard_sq_sum ||
+        !inverse_collisions) goto done;
 
     for (repeat=0;repeat<repeats;++repeat) {
         const SubseqHash3Tables *tables=table_file->tables+repeat;
@@ -273,13 +396,57 @@ static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
                 jaccard_sum[left_split]+=value;
                 jaccard_sq_sum[left_split]+=value*value;
             }
+            if (!repeat) {
+                uint64_t *lh=calloc(per*repeats,sizeof(*lh));
+                uint64_t *ll=calloc(per*repeats,sizeof(*ll));
+                uint64_t *rh=calloc(per*repeats,sizeof(*rh));
+                uint64_t *rl=calloc(per*repeats,sizeof(*rl));
+                if (!lh || !ll || !rh || !rl) {
+                    free(lh); free(ll); free(rh); free(rl); goto pair_failed;
+                }
+                for (left_split=0;left_split<per;++left_split) {
+                    size_t count1=0,count2=0; double start;
+                    start=seconds(CLOCK_MONOTONIC);
+                    if (visit_neighborhood(left_text,left_split,edits-left_split,
+                                           0,0,&count1,NULL,NULL) ||
+                        visit_neighborhood(right_text,left_split,edits-left_split,
+                                           0,0,&count2,NULL,NULL)) {
+                        free(lh); free(ll); free(rh); free(rl); goto pair_failed;
+                    }
+                    enumeration_wall+=seconds(CLOCK_MONOTONIC)-start;
+                    start=seconds(CLOCK_MONOTONIC);
+                    if (visit_neighborhood(left_text,left_split,edits-left_split,
+                                           repeats,1,&count1,
+                                           lh+left_split*repeats,
+                                           ll+left_split*repeats) ||
+                        visit_neighborhood(right_text,left_split,edits-left_split,
+                                           repeats,1,&count2,
+                                           rh+left_split*repeats,
+                                           rl+left_split*repeats)) {
+                        free(lh); free(ll); free(rh); free(rl); goto pair_failed;
+                    }
+                    minhash_wall+=seconds(CLOCK_MONOTONIC)-start;
+                }
+                for (left_split=0;left_split<per;++left_split)
+                    for (right_split=0;right_split<per;++right_split) {
+                        size_t index=left_split*per+right_split,trial;
+                        if (n1-(edits-left_split)!=n2-(edits-right_split)) continue;
+                        for (trial=0;trial<repeats;++trial)
+                            inverse_collisions[index]+=
+                                lh[left_split*repeats+trial]==rh[right_split*repeats+trial] &&
+                                ll[left_split*repeats+trial]==rl[right_split*repeats+trial];
+                    }
+                free(lh); free(ll); free(rh); free(rl);
+            }
             s1=malloc(n1); s2=malloc(n2);
             left=calloc(per,sizeof(*left)); right=calloc(per,sizeof(*right));
             if (!s1 || !s2 || !left || !right) goto pair_failed;
             encode(left_text,n1,s1); encode(right_text,n2,s2);
+            { double dp_start=seconds(CLOCK_MONOTONIC);
             if (subseqhash3_compute_all_edit_splits(s1,n1,edits,tables,left) ||
                 subseqhash3_compute_all_edit_splits(s2,n2,edits,tables,right))
                 goto pair_failed;
+            dp_wall+=seconds(CLOCK_MONOTONIC)-dp_start; }
             for (left_split=0;left_split<per;++left_split)
                 for (right_split=0;right_split<per;++right_split) {
                     size_t index=left_split*per+right_split;
@@ -319,6 +486,9 @@ repeat_failed:
     printf("average_pairs %.3f\n",pairs_sum/repeats);
     printf("average_wall_seconds %.6f\n",wall_sum/repeats);
     printf("average_cpu_seconds %.6f\n",cpu_sum/repeats);
+    printf("neighbor_enumeration_wall_seconds %.6f\n",enumeration_wall);
+    printf("inverse_permutation_minhash_wall_seconds %.6f\n",minhash_wall);
+    printf("current_dp_wall_seconds %.6f\n",dp_wall);
     printf("any_seed_collision_probability %.9f\n",
            pairs_sum?any_sum/pairs_sum:0.0);
     printf("all_compatible_seeds_collision_probability %.9f\n",
@@ -330,6 +500,10 @@ repeat_failed:
                 printf("left_Es%zu_Ed%zu_right_Es%zu_Ed%zu_collision_probability %.9f\n",
                        left_split,edits-left_split,right_split,
                        edits-right_split,collisions[index]/denominators[index]);
+            if (denominators[index])
+                printf("left_Es%zu_Ed%zu_right_Es%zu_Ed%zu_inverse_permutation_collision_probability %.9f\n",
+                       left_split,edits-left_split,right_split,
+                       edits-right_split,inverse_collisions[index]/denominators[index]);
         }
     for (left_split=0;left_split<per;++left_split) {
         double mean=jaccard_sum[left_split]/expected_pairs;
@@ -342,6 +516,7 @@ repeat_failed:
     }
     status=0;
 done:
+    free(inverse_collisions);
     free(jaccard_sq_sum); free(jaccard_sum);
     free(denominators); free(collisions); free(line); fclose(input);
     return status;

@@ -74,3 +74,16 @@ rename and re-organize the files/functions. first, the project is named "subseqh
   subseqhash_edits_i8 as subseqhash3; compile everything into only one binary, which can carry multiple functions; for examples: "subseqhash3
   simulate ..." which simulate pairs of strings; "subseqhash3 seeds ..." which generate seeds; "subseqhash3 collisions ..." which estimate
   probability of hash-collision using the input files; "subseqhash3 test ..." which does some tests; show me your plan before conducting changes
+
+
+
+
+    1. Implement inverse-permutation MinHash as an experimental reference backend. It most directly tests how close the empirical measurements can get
+     to Jaccard.
+
+  2. Implement (M)-candidate DP plus whole-string MinHash for (M=1,4,8,16,32).
+  3. Add the diagnostic decomposition above.
+  4. Measure duplicate/path-multiplicity bias.
+  5. If candidate pooling saturates below Jaccard, try a contextual scoring DP with adjacent-symbol random terms.
+  6. Compare collision/Jaccard ratio, runtime, and memory per split.
+
