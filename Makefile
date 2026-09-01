@@ -3,6 +3,7 @@ CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Wpedantic
 CPPFLAGS ?= -Isrc
 LDFLAGS ?=
 LDLIBS ?=
+LDLIBS += -lm
 
 SRC_DIR := src
 BUILD_DIR := build

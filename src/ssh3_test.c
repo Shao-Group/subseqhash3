@@ -1,8 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "subseqhash3.h"
 #include "table_file.h"
+#include "ssh3_collisions.h"
 
 #include <assert.h>
+#include <math.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -186,6 +188,12 @@ int ssh3_test_main(int argc,char **argv) {
         return EXIT_FAILURE;
     }
     (void)argv;
+    assert(ssh3_edit_neighborhood_jaccard("ACGT","ACGT",0,0)==1.0);
+    assert(ssh3_edit_neighborhood_jaccard("A","C",0,0)==0.0);
+    assert(fabs(ssh3_edit_neighborhood_jaccard("A","C",1,0)-0.5)<1e-12);
+    assert(ssh3_edit_neighborhood_jaccard("AC","CA",0,1)==1.0);
+    assert(ssh3_edit_neighborhood_jaccard("AC","GT",0,1)==0.0);
+    assert(isnan(ssh3_edit_neighborhood_jaccard("AX","AC",0,0)));
     test_table_file();
     test_long_windows();
     for (trial=0;trial<200;++trial) {

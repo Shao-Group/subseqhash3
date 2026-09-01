@@ -1,11 +1,129 @@
 #define _POSIX_C_SOURCE 200809L
 #include "table_file.h"
+#include "ssh3_collisions.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+typedef struct {
+    uint64_t *bits;
+    long double paths;
+} EditDfaState;
+
+typedef struct {
+    const char *text;
+    size_t n,es,ed,cells,words;
+} EditDfa;
+
+static size_t edit_cell(const EditDfa *a,size_t p,size_t d,size_t s) {
+    return (p*(a->ed+1)+d)*(a->es+1)+s;
+}
+
+static void bit_set(uint64_t *bits,size_t i) { bits[i>>6]|=UINT64_C(1)<<(i&63); }
+static int bit_get(const uint64_t *bits,size_t i) { return (int)((bits[i>>6]>>(i&63))&1); }
+
+/* Add all states reachable by deleting bases. */
+static void deletion_closure(const EditDfa *a,uint64_t *bits) {
+    size_t p,d,s;
+    for (p=0;p<a->n;++p) for (d=0;d<a->ed;++d) for (s=0;s<=a->es;++s)
+        if (bit_get(bits,edit_cell(a,p,d,s)))
+            bit_set(bits,edit_cell(a,p+1,d+1,s));
+}
+
+static int dfa_step(const EditDfa *a,const uint64_t *from,unsigned symbol,
+                    uint64_t *to) {
+    size_t p,d,s; int nonempty=0;
+    memset(to,0,a->words*sizeof(*to));
+    for (p=0;p<a->n;++p) for (d=0;d<=a->ed;++d) for (s=0;s<=a->es;++s) {
+        size_t next_s;
+        unsigned original;
+        if (!bit_get(from,edit_cell(a,p,d,s))) continue;
+        original=a->text[p]=='A'||a->text[p]=='a'?0:
+                 a->text[p]=='C'||a->text[p]=='c'?1:
+                 a->text[p]=='G'||a->text[p]=='g'?2:3;
+        next_s=s+(symbol!=original);
+        if (next_s<=a->es) {
+            bit_set(to,edit_cell(a,p+1,d,next_s)); nonempty=1;
+        }
+    }
+    if (nonempty) deletion_closure(a,to);
+    return nonempty;
+}
+
+static int add_state(EditDfaState **states,size_t *count,size_t *capacity,
+                     const uint64_t *bits,size_t words,long double paths) {
+    size_t i;
+    for (i=0;i<*count;++i)
+        if (!memcmp((*states)[i].bits,bits,words*sizeof(*bits))) {
+            (*states)[i].paths+=paths; return 0;
+        }
+    if (*count==*capacity) {
+        size_t next=*capacity?*capacity*2:8;
+        EditDfaState *grown=realloc(*states,next*sizeof(**states));
+        if (!grown) return -1;
+        *states=grown; *capacity=next;
+    }
+    (*states)[*count].bits=malloc(words*sizeof(*bits));
+    if (!(*states)[*count].bits) return -1;
+    memcpy((*states)[*count].bits,bits,words*sizeof(*bits));
+    (*states)[*count].paths=paths; ++*count; return 0;
+}
+
+static void free_states(EditDfaState *states,size_t count) {
+    size_t i; for (i=0;i<count;++i) free(states[i].bits); free(states);
+}
+
+/* Count the language of a, or its intersection with b when b is non-NULL. */
+static int count_language(const EditDfa *a,const EditDfa *b,long double *answer) {
+    EditDfaState *current=NULL,*next=NULL; size_t nc=0,cc=0,nn,cn,i,k,length=a->n-a->ed;
+    size_t pair_words=a->words+(b?b->words:0),step_words=pair_words;
+    uint64_t *initial=calloc(pair_words,sizeof(*initial)),*stepped=calloc(step_words,sizeof(*stepped));
+    if (!initial || !stepped) goto fail;
+    bit_set(initial,edit_cell(a,0,0,0)); deletion_closure(a,initial);
+    if (b) { bit_set(initial+a->words,edit_cell(b,0,0,0)); deletion_closure(b,initial+a->words); }
+    if (add_state(&current,&cc,&nc,initial,pair_words,1.0L)) goto fail;
+    for (k=0;k<length;++k) {
+        nn=cn=0; next=NULL;
+        for (i=0;i<cc;++i) for (unsigned x=0;x<4;++x) {
+            if (!dfa_step(a,current[i].bits,x,stepped)) continue;
+            if (b && !dfa_step(b,current[i].bits+a->words,x,stepped+a->words)) continue;
+            if (add_state(&next,&nn,&cn,stepped,pair_words,current[i].paths)) { free_states(next,nn); goto fail; }
+        }
+        free_states(current,cc); current=next; cc=nn; nc=cn;
+    }
+    *answer=0;
+    for (i=0;i<cc;++i) {
+        int accept=bit_get(current[i].bits,edit_cell(a,a->n,a->ed,a->es));
+        if (b) accept&=bit_get(current[i].bits+a->words,edit_cell(b,b->n,b->ed,b->es));
+        if (accept) *answer+=current[i].paths;
+    }
+    free(initial); free(stepped); free_states(current,cc); return 0;
+fail:
+    free(initial); free(stepped); free_states(current,cc); return -1;
+}
+
+static int init_dfa(EditDfa *a,const char *text,size_t es,size_t ed) {
+    size_t n=strlen(text),i;
+    if (ed>n || es>n-ed) return -1;
+    for (i=0;i<n;++i) if (!strchr("ACGTacgt",text[i])) return -1;
+    if (n+1>SIZE_MAX/(ed+1) || (n+1)*(ed+1)>SIZE_MAX/(es+1)) return -1;
+    a->text=text; a->n=n; a->es=es; a->ed=ed;
+    a->cells=(n+1)*(ed+1)*(es+1); a->words=(a->cells+63)/64; return 0;
+}
+
+double ssh3_edit_neighborhood_jaccard(const char *s,const char *t,size_t es,size_t ed) {
+    EditDfa a,b; long double na,nb,intersection,union_size;
+    if (!s || !t || init_dfa(&a,s,es,ed) || init_dfa(&b,t,es,ed)) return NAN;
+    if (count_language(&a,NULL,&na) || count_language(&b,NULL,&nb)) return NAN;
+    if (a.n-a.ed!=b.n-b.ed) intersection=0;
+    else if (count_language(&a,&b,&intersection)) return NAN;
+    union_size=na+nb-intersection;
+    return union_size?(double)(intersection/union_size):1.0;
+}
 
 static double seconds(clockid_t clock_id) {
     struct timespec value;
@@ -121,13 +239,15 @@ static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
     FILE *input=fopen(filename,"r");
     char *line=NULL; size_t capacity=0,repeat,left_split,right_split;
     double pairs_sum=0,any_sum=0,all_sum=0,wall_sum=0,cpu_sum=0;
-    double *collisions=NULL,*denominators=NULL;
+    double *collisions=NULL,*denominators=NULL,*jaccard_sum=NULL,*jaccard_sq_sum=NULL;
     int status=-1;
     if (!input) { perror(filename); return -1; }
     if (per>SIZE_MAX/per || per*per>SIZE_MAX/sizeof(*collisions)) goto done;
     collisions=calloc(per*per,sizeof(*collisions));
     denominators=calloc(per*per,sizeof(*denominators));
-    if (!collisions || !denominators) goto done;
+    jaccard_sum=calloc(per,sizeof(*jaccard_sum));
+    jaccard_sq_sum=calloc(per,sizeof(*jaccard_sq_sum));
+    if (!collisions || !denominators || !jaccard_sum || !jaccard_sq_sum) goto done;
 
     for (repeat=0;repeat<repeats;++repeat) {
         const SubseqHash3Tables *tables=table_file->tables+repeat;
@@ -143,6 +263,16 @@ static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
             int any=0,all=1;
             if (parse_pair(line,(size_t)read,&left_text,&n1,&right_text,&n2))
                 goto repeat_failed;
+            /* The edit neighborhoods do not depend on the random hash tables.
+             * Compute each input pair once, then weight it by the repeat count
+             * when reporting statistics over all pair/trial observations. */
+            if (!repeat) for (left_split=0;left_split<per;++left_split) {
+                double value=ssh3_edit_neighborhood_jaccard(
+                    left_text,right_text,left_split,edits-left_split);
+                if (isnan(value)) goto pair_failed;
+                jaccard_sum[left_split]+=value;
+                jaccard_sq_sum[left_split]+=value*value;
+            }
             s1=malloc(n1); s2=malloc(n2);
             left=calloc(per,sizeof(*left)); right=calloc(per,sizeof(*right));
             if (!s1 || !s2 || !left || !right) goto pair_failed;
@@ -201,8 +331,18 @@ repeat_failed:
                        left_split,edits-left_split,right_split,
                        edits-right_split,collisions[index]/denominators[index]);
         }
+    for (left_split=0;left_split<per;++left_split) {
+        double mean=jaccard_sum[left_split]/expected_pairs;
+        double variance=jaccard_sq_sum[left_split]/expected_pairs-mean*mean;
+        if (variance<0 && variance>-1e-15) variance=0;
+        printf("Es%zu_Ed%zu_average_jaccard %.9f\n",
+               left_split,edits-left_split,mean);
+        printf("Es%zu_Ed%zu_jaccard_std %.9f\n",
+               left_split,edits-left_split,sqrt(variance));
+    }
     status=0;
 done:
+    free(jaccard_sq_sum); free(jaccard_sum);
     free(denominators); free(collisions); free(line); fclose(input);
     return status;
 }
