@@ -929,9 +929,12 @@ layer_complete:
         out->positions=malloc((k?k:1)*sizeof(*out->positions));
         out->substituted=malloc(k?k:1);
         if (!out->seed || !out->positions || !out->substituted) goto done;
-        for (r=0;r<d &&
-             old_mn[I8_SCORE_STATE(deletions,substitutions,r)]==I8_POSITIVE_INFINITY;++r) {}
-        if (r==d) goto done;
+        r=d;
+        while (r &&
+               old_mn[I8_SCORE_STATE(deletions,substitutions,r-1)]==
+               I8_POSITIVE_INFINITY) --r;
+        if (!r) goto done;
+        --r;
         out->psi=r;
         type=llabs((long long)old_mn[I8_SCORE_STATE(deletions,substitutions,r)])>=
              llabs((long long)old_mx[I8_SCORE_STATE(deletions,substitutions,r)])

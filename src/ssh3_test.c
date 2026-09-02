@@ -74,8 +74,10 @@ static void validate_optimum(const uint8_t *sequence,size_t n,
         brute.maximum[residue]=INT_MIN;
     }
     brute_positions(&brute,0,0,positions);
-    for (residue=0;residue<tables->d &&
-         brute.minimum[residue]==INT_MAX;++residue) {}
+    residue=tables->d;
+    while (residue && brute.minimum[residue-1]==INT_MAX) --residue;
+    assert(residue);
+    --residue;
     assert(residue==result->psi);
     expected=llabs((long long)brute.minimum[residue])>=
              llabs((long long)brute.maximum[residue])?
