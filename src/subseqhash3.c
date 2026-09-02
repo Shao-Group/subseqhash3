@@ -44,15 +44,11 @@ static size_t triangular_state(size_t edit_count,size_t deletions,
 int subseqhash3_tables_init(SubseqHash3Tables *t,size_t k,size_t d,
                                uint64_t seed) {
     static const int8_t b1[4]={1,1,-1,-1},b2[4]={1,-1,1,-1};
-    size_t cells,mask_cells,f_cells,i,r,a,tail,lane;
+    size_t cells,mask_cells,i,r,a,tail,lane;
     if (!t || !d || k>(size_t)((I8_POSITIVE_INFINITY-1)/127) ||
         k>SIZE_MAX/d || k*d>SIZE_MAX/4 ||
         k*d*4>SIZE_MAX/sizeof(*t->A)) return -1;
     memset(t,0,sizeof(*t)); t->k=k; t->d=d; t->blocks=(d+31)/32;
-    if (k>SIZE_MAX/128 || 128*k==SIZE_MAX) return -1;
-    t->f_stride=128*k+1;
-    if (d>SIZE_MAX/t->f_stride) return -1;
-    f_cells=d*t->f_stride;
     cells=k*d*4;
     if (k>SIZE_MAX/4 || k*4>SIZE_MAX/t->blocks) return -1;
     mask_cells=k*4*t->blocks;
@@ -62,9 +58,8 @@ int subseqhash3_tables_init(SubseqHash3Tables *t,size_t k,size_t d,
     t->B1_masks=calloc(mask_cells?mask_cells:1,sizeof(*t->B1_masks));
     t->wrap_indices=malloc(32*32*sizeof(*t->wrap_indices));
     t->C=malloc((k?k*4:1)*sizeof(*t->C));
-    t->F=malloc((f_cells?f_cells:1)*sizeof(*t->F));
     if (!t->A || !t->B1 || !t->B2 || !t->signed_A ||
-        !t->B1_masks || !t->wrap_indices || !t->C || !t->F) {
+        !t->B1_masks || !t->wrap_indices || !t->C) {
         subseqhash3_tables_destroy(t); return -1;
     }
     for (tail=0;tail<32;++tail) for (lane=0;lane<32;++lane)
@@ -97,20 +92,12 @@ int subseqhash3_tables_init(SubseqHash3Tables *t,size_t k,size_t d,
                 (a>2&&value==t->C[4*i+2])));
         t->C[4*i+a]=value;
     }
-    for (r=0;r<d;++r) {
-        float value=0.0f;
-        for (i=0;i<t->f_stride;++i) {
-            value+=(float)((double)next_random(&seed)/(double)UINT64_MAX);
-            t->F[r*t->f_stride+i]=value;
-        }
-    }
     return 0;
 }
 
 void subseqhash3_tables_destroy(SubseqHash3Tables *t) {
     if (!t) return;
-    free(t->F); free(t->C); free(t->wrap_indices); free(t->B1_masks);
-    free(t->signed_A);
+    free(t->C); free(t->wrap_indices); free(t->B1_masks); free(t->signed_A);
     free(t->B2); free(t->B1); free(t->A);
     memset(t,0,sizeof(*t));
 }
@@ -693,9 +680,7 @@ static int compute_all_edit_splits_impl(
     int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
     uint8_t *parent=NULL;
     int status=-1;
-    if (!t || !results || n>SIZE_MAX/128 || !t->d || !t->F ||
-        t->f_stride<128*n+1 ||
-        t->k<n || total_edits>n ||
+    if (!t || !results || !t->d || t->k<n || total_edits>n ||
         (n&&!s)) return -1;
     d=t->d; e_count=total_edits+1;
     if (!e_count || e_count>SIZE_MAX/sizeof(*results) ||
@@ -938,32 +923,19 @@ layer_complete:
         SubseqHash3EditResult *out=results+result_index;
         size_t substitutions=result_index,deletions=total_edits-substitutions;
         size_t k=n-deletions;
-        int type=0;
-        float best_transformed=0.0f;
-        int have_best=0;
+        int type;
         out->deletions=deletions; out->substitutions=substitutions;
         out->length=k; out->seed=malloc(k?k:1);
         out->positions=malloc((k?k:1)*sizeof(*out->positions));
         out->substituted=malloc(k?k:1);
         if (!out->seed || !out->positions || !out->substituted) goto done;
-        for (r=0;r<d;++r) {
-            int16_t minimum=old_mn[I8_SCORE_STATE(deletions,substitutions,r)];
-            int16_t maximum=old_mx[I8_SCORE_STATE(deletions,substitutions,r)];
-            size_t magnitude;
-            float transformed;
-            int candidate_type;
-            if (minimum==I8_POSITIVE_INFINITY) continue;
-            candidate_type=llabs((long long)minimum)>=llabs((long long)maximum)?1:2;
-            magnitude=(size_t)llabs((long long)(candidate_type==1?minimum:maximum));
-            if (magnitude>=t->f_stride) goto done;
-            transformed=t->F[r*t->f_stride+magnitude];
-            if (!have_best || transformed>best_transformed) {
-                have_best=1; best_transformed=transformed;
-                out->psi=r; type=candidate_type;
-            }
-        }
-        if (!have_best) goto done;
-        r=out->psi;
+        for (r=0;r<d &&
+             old_mn[I8_SCORE_STATE(deletions,substitutions,r)]==I8_POSITIVE_INFINITY;++r) {}
+        if (r==d) goto done;
+        out->psi=r;
+        type=llabs((long long)old_mn[I8_SCORE_STATE(deletions,substitutions,r)])>=
+             llabs((long long)old_mx[I8_SCORE_STATE(deletions,substitutions,r)])
+             ?1:2;
         out->omega=(double)(type==1?
             old_mn[I8_SCORE_STATE(deletions,substitutions,r)]:
             old_mx[I8_SCORE_STATE(deletions,substitutions,r)]);

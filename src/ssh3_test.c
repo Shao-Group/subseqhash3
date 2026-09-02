@@ -74,23 +74,8 @@ static void validate_optimum(const uint8_t *sequence,size_t n,
         brute.maximum[residue]=INT_MIN;
     }
     brute_positions(&brute,0,0,positions);
-    {
-        float best=0.0f; int have_best=0;
-        size_t best_residue=0;
-        for (residue=0;residue<tables->d;++residue) {
-            size_t magnitude; float transformed;
-            if (brute.minimum[residue]==INT_MAX) continue;
-            expected=llabs((long long)brute.minimum[residue])>=
-                     llabs((long long)brute.maximum[residue])?
-                     brute.minimum[residue]:brute.maximum[residue];
-            magnitude=(size_t)llabs((long long)expected);
-            transformed=tables->F[residue*tables->f_stride+magnitude];
-            if (!have_best || transformed>best) {
-                have_best=1; best=transformed; best_residue=residue;
-            }
-        }
-        residue=best_residue;
-    }
+    for (residue=0;residue<tables->d &&
+         brute.minimum[residue]==INT_MAX;++residue) {}
     assert(residue==result->psi);
     expected=llabs((long long)brute.minimum[residue])>=
              llabs((long long)brute.maximum[residue])?
@@ -184,44 +169,10 @@ static void test_table_file(void) {
         assert(!memcmp(actual->B1_masks,expected.B1_masks,
                        n*4*expected.blocks*sizeof(uint32_t)));
         assert(!memcmp(actual->C,expected.C,n*4*sizeof(size_t)));
-        assert(actual->f_stride==expected.f_stride);
-        assert(!memcmp(actual->F,expected.F,
-                       d*expected.f_stride*sizeof(float)));
         subseqhash3_tables_destroy(&expected);
     }
     subseqhash3_table_file_close(&file);
     assert(!unlink(path));
-}
-
-static void test_monotone_function_selection(void) {
-    uint8_t sequence[1]={0};
-    SubseqHash3Tables tables={0};
-    SubseqHash3EditResult results[2]={0};
-    size_t target;
-    assert(!subseqhash3_tables_init(&tables,1,4,123));
-    for (target=0;target<tables.d;++target) {
-        size_t x;
-        assert(tables.F[target*tables.f_stride]>=0.0f);
-        assert(tables.F[target*tables.f_stride]<=1.0f);
-        for (x=1;x<tables.f_stride;++x)
-            assert(tables.F[target*tables.f_stride+x]>=
-                   tables.F[target*tables.f_stride+x-1]);
-    }
-    /* With one required substitution, symbols 1, 2, and 3 are candidates.
-       Give only symbol 2's residue a positive transformed score. */
-    target=tables.C[2];
-    memset(tables.F,0,tables.d*tables.f_stride*sizeof(*tables.F));
-    {
-        size_t x;
-        for (x=0;x<tables.f_stride;++x)
-            tables.F[target*tables.f_stride+x]=1.0f;
-    }
-    assert(!subseqhash3_compute_all_edit_splits(sequence,1,1,&tables,results));
-    assert(results[1].psi==target);
-    assert(results[1].seed[0]==2);
-    validate_result(sequence,0,1,&tables,results+1);
-    subseqhash3_edit_results_destroy(results,2);
-    subseqhash3_tables_destroy(&tables);
 }
 
 int ssh3_test_main(int argc,char **argv) {
@@ -243,7 +194,6 @@ int ssh3_test_main(int argc,char **argv) {
     assert(ssh3_edit_neighborhood_jaccard("AC","CA",0,1)==1.0);
     assert(ssh3_edit_neighborhood_jaccard("AC","GT",0,1)==0.0);
     assert(isnan(ssh3_edit_neighborhood_jaccard("AX","AC",0,0)));
-    test_monotone_function_selection();
     test_table_file();
     test_long_windows();
     for (trial=0;trial<200;++trial) {
