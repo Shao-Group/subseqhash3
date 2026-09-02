@@ -22,7 +22,9 @@ static void help(FILE *stream) {
           "  R       Number of independently randomized table sets.\n"
           "  OUTPUT  Destination binary table file.\n\n"
           "Options:\n"
-          "  --seed SEED  Use a reproducible unsigned random seed.\n",
+          "  --seed SEED  Use a reproducible unsigned random seed.\n\n"
+          "Each table set includes D monotone random scoring functions over\n"
+          "omega magnitudes 0 through 128*n.\n",
           stream);
 }
 

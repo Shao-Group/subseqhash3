@@ -21,6 +21,9 @@ typedef struct {
     size_t blocks;
     uint16_t *wrap_indices;
     size_t *C;
+    /* Function d occupies f_stride entries.  F[d*f_stride+x] is f_d(x). */
+    float *F;
+    size_t f_stride;
 } SubseqHash3Tables;
 
 int subseqhash3_tables_init(SubseqHash3Tables *tables,

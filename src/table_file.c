@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define TABLE_VERSION UINT32_C(1)
+#define TABLE_VERSION UINT32_C(2)
 #define TABLE_ENDIAN UINT32_C(0x01020304)
 
 typedef struct {
@@ -18,6 +18,7 @@ typedef struct {
     uint32_t version,endian,word_size,reserved;
     uint64_t n,d,count,file_size,set_base,set_stride,wrap_offset;
     uint64_t a_offset,b1_offset,b2_offset,signed_a_offset,masks_offset,c_offset;
+    uint64_t f_offset,f_stride;
     uint64_t generation_seed;
     uint8_t padding[128];
 } TableHeader;
@@ -27,9 +28,11 @@ static size_t align64(size_t value) {
 }
 
 static int layout(size_t n,size_t d,size_t count,TableHeader *header) {
-    size_t cells,blocks,mask_cells,offset,stride,total;
+    size_t cells,blocks,mask_cells,f_cells,offset,stride,total;
     if (!n || !d || !count || n>SIZE_MAX/d || n*d>SIZE_MAX/4) return -1;
     cells=n*d*4; blocks=(d+31)/32;
+    if (n>SIZE_MAX/128 || 128*n==SIZE_MAX || d>SIZE_MAX/(128*n+1)) return -1;
+    f_cells=d*(128*n+1);
     if (n>SIZE_MAX/4 || n*4>SIZE_MAX/blocks) return -1;
     mask_cells=n*4*blocks;
     memset(header,0,sizeof(*header));
@@ -49,7 +52,10 @@ static int layout(size_t n,size_t d,size_t count,TableHeader *header) {
     offset=align64(offset+mask_cells*sizeof(uint32_t));
     header->c_offset=offset;
     if (n*4>SIZE_MAX/sizeof(size_t)) return -1;
-    stride=align64(offset+n*4*sizeof(size_t));
+    offset=align64(offset+n*4*sizeof(size_t));
+    header->f_offset=offset; header->f_stride=128*n+1;
+    if (f_cells>(SIZE_MAX-offset)/sizeof(float)) return -1;
+    stride=align64(offset+f_cells*sizeof(float));
     if (count>(SIZE_MAX-(size_t)header->set_base)/stride) return -1;
     total=(size_t)header->set_base+count*stride;
     header->set_stride=stride; header->file_size=total;
@@ -59,13 +65,15 @@ static int layout(size_t n,size_t d,size_t count,TableHeader *header) {
 static void copy_set(uint8_t *base,const TableHeader *h,
                      const SubseqHash3Tables *table) {
     size_t cells=(size_t)h->n*(size_t)h->d*4;
-    size_t masks=(size_t)h->n*4*((size_t)h->d+31)/32;
+    size_t masks=(size_t)h->n*4*(((size_t)h->d+31)/32);
     memcpy(base+h->a_offset,table->A,cells);
     memcpy(base+h->b1_offset,table->B1,cells);
     memcpy(base+h->b2_offset,table->B2,cells);
     memcpy(base+h->signed_a_offset,table->signed_A,cells);
     memcpy(base+h->masks_offset,table->B1_masks,masks*sizeof(uint32_t));
     memcpy(base+h->c_offset,table->C,(size_t)h->n*4*sizeof(size_t));
+    memcpy(base+h->f_offset,table->F,
+           (size_t)h->d*(size_t)h->f_stride*sizeof(float));
 }
 
 int subseqhash3_table_file_create(const char *path,size_t n,size_t d,
@@ -132,7 +140,8 @@ int subseqhash3_table_file_open(SubseqHash3TableFile *file,const char *path) {
         h->wrap_offset!=expected.wrap_offset || h->a_offset!=expected.a_offset ||
         h->b1_offset!=expected.b1_offset || h->b2_offset!=expected.b2_offset ||
         h->signed_a_offset!=expected.signed_a_offset ||
-        h->masks_offset!=expected.masks_offset || h->c_offset!=expected.c_offset) {
+        h->masks_offset!=expected.masks_offset || h->c_offset!=expected.c_offset ||
+        h->f_offset!=expected.f_offset || h->f_stride!=expected.f_stride) {
         fprintf(stderr,"invalid or incompatible table file: %s\n",path);
         munmap(mapping,(size_t)info.st_size); return -1;
     }
@@ -150,6 +159,8 @@ int subseqhash3_table_file_open(SubseqHash3TableFile *file,const char *path) {
         t->signed_A=(int8_t *)(base+h->signed_a_offset);
         t->B1_masks=(uint32_t *)(base+h->masks_offset);
         t->C=(size_t *)(base+h->c_offset);
+        t->F=(float *)(base+h->f_offset);
+        t->f_stride=(size_t)h->f_stride;
         t->wrap_indices=(uint16_t *)(mapping+h->wrap_offset);
     }
     return 0;
