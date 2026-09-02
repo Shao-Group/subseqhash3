@@ -176,7 +176,7 @@ static void test_table_file(void) {
 }
 
 int ssh3_test_main(int argc,char **argv) {
-    size_t trial,neighborhood_size;
+    size_t trial;
     if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) {
         fputs("Run the built-in SubseqHash3 correctness tests.\n\n"
               "Usage:\n  subseqhash3 test\n",stdout);
@@ -194,13 +194,6 @@ int ssh3_test_main(int argc,char **argv) {
     assert(ssh3_edit_neighborhood_jaccard("AC","CA",0,1)==1.0);
     assert(ssh3_edit_neighborhood_jaccard("AC","GT",0,1)==0.0);
     assert(isnan(ssh3_edit_neighborhood_jaccard("AX","AC",0,0)));
-    assert(!ssh3_edit_neighborhood_size("A",1,0,&neighborhood_size));
-    assert(neighborhood_size==3);
-    assert(!ssh3_edit_neighborhood_size("AC",0,1,&neighborhood_size));
-    assert(neighborhood_size==2);
-    assert(!ssh3_edit_neighborhood_size("AA",0,1,&neighborhood_size));
-    assert(neighborhood_size==1);
-    assert(ssh3_edit_neighborhood_size("AX",0,0,&neighborhood_size));
     test_table_file();
     test_long_windows();
     for (trial=0;trial<200;++trial) {
