@@ -141,7 +141,7 @@ static int parse_size(const char *text,size_t *value) {
 
 static void help(FILE *stream) {
     fputs("Estimate SubseqHash3 seed-collision probabilities from DNA pairs.\n\n"
-          "Usage:\n  subseqhash3 collisions PAIRS_FILE E D R [TABLE_FILE]\n\n"
+          "Usage:\n  subseqhash3 collisions PAIRS_FILE E D R [TABLE_FILE] [--jaccard]\n\n"
           "Arguments:\n"
           "  PAIRS_FILE  CSV input with one STRING1,STRING2 pair per line.\n"
           "               Strings in a pair may have different lengths.\n"
@@ -149,6 +149,9 @@ static void help(FILE *stream) {
           "  D           Number of hash residues.\n"
           "  R           Number of table sets and repeated trials.\n"
           "  TABLE_FILE  Optional reusable table file matching D and R.\n\n"
+          "Options:\n"
+          "  --jaccard   Compute and output edit-neighborhood Jaccard statistics.\n"
+          "               Disabled by default because this calculation is slow.\n\n"
           "Only left/right edit splits producing equal-length seeds are compared.\n"
           "If TABLE_FILE is omitted, new tables are written to PAIRS_FILE.ABC.\n",
           stream);
@@ -234,7 +237,7 @@ static int encode(const char *text,size_t length,uint8_t *sequence) {
 
 static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
                     size_t maximum_length,size_t expected_pairs,
-                    const SubseqHash3TableFile *table_file) {
+                    const SubseqHash3TableFile *table_file,int compute_jaccard) {
     const size_t per=edits+1;
     FILE *input=fopen(filename,"r");
     char *line=NULL; size_t capacity=0,repeat,left_split,right_split;
@@ -245,9 +248,12 @@ static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
     if (per>SIZE_MAX/per || per*per>SIZE_MAX/sizeof(*collisions)) goto done;
     collisions=calloc(per*per,sizeof(*collisions));
     denominators=calloc(per*per,sizeof(*denominators));
-    jaccard_sum=calloc(per,sizeof(*jaccard_sum));
-    jaccard_sq_sum=calloc(per,sizeof(*jaccard_sq_sum));
-    if (!collisions || !denominators || !jaccard_sum || !jaccard_sq_sum) goto done;
+    if (compute_jaccard) {
+        jaccard_sum=calloc(per,sizeof(*jaccard_sum));
+        jaccard_sq_sum=calloc(per,sizeof(*jaccard_sq_sum));
+    }
+    if (!collisions || !denominators ||
+        (compute_jaccard && (!jaccard_sum || !jaccard_sq_sum))) goto done;
 
     for (repeat=0;repeat<repeats;++repeat) {
         const SubseqHash3Tables *tables=table_file->tables+repeat;
@@ -266,7 +272,8 @@ static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
             /* The edit neighborhoods do not depend on the random hash tables.
              * Compute each input pair once, then weight it by the repeat count
              * when reporting statistics over all pair/trial observations. */
-            if (!repeat) for (left_split=0;left_split<per;++left_split) {
+            if (compute_jaccard && !repeat)
+                for (left_split=0;left_split<per;++left_split) {
                 double value=ssh3_edit_neighborhood_jaccard(
                     left_text,right_text,left_split,edits-left_split);
                 if (isnan(value)) goto pair_failed;
@@ -331,15 +338,16 @@ repeat_failed:
                        left_split,edits-left_split,right_split,
                        edits-right_split,collisions[index]/denominators[index]);
         }
-    for (left_split=0;left_split<per;++left_split) {
-        double mean=jaccard_sum[left_split]/expected_pairs;
-        double variance=jaccard_sq_sum[left_split]/expected_pairs-mean*mean;
-        if (variance<0 && variance>-1e-15) variance=0;
-        printf("Es%zu_Ed%zu_average_jaccard %.9f\n",
-               left_split,edits-left_split,mean);
-        printf("Es%zu_Ed%zu_jaccard_std %.9f\n",
-               left_split,edits-left_split,sqrt(variance));
-    }
+    if (compute_jaccard)
+        for (left_split=0;left_split<per;++left_split) {
+            double mean=jaccard_sum[left_split]/expected_pairs;
+            double variance=jaccard_sq_sum[left_split]/expected_pairs-mean*mean;
+            if (variance<0 && variance>-1e-15) variance=0;
+            printf("Es%zu_Ed%zu_average_jaccard %.9f\n",
+                   left_split,edits-left_split,mean);
+            printf("Es%zu_Ed%zu_jaccard_std %.9f\n",
+                   left_split,edits-left_split,sqrt(variance));
+        }
     status=0;
 done:
     free(jaccard_sq_sum); free(jaccard_sum);
@@ -349,6 +357,8 @@ done:
 
 int ssh3_collisions_main(int argc,char **argv) {
     size_t edits,d,repeats,maximum_length,pairs;
+    int argument,compute_jaccard=0;
+    const char *table_path=NULL;
     uint64_t seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
     SubseqHash3TableFile tables={0};
     char *generated_path=NULL;
@@ -356,13 +366,20 @@ int ssh3_collisions_main(int argc,char **argv) {
     if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) {
         help(stdout); return EXIT_SUCCESS;
     }
-    if ((argc!=5 && argc!=6) || parse_size(argv[2],&edits) ||
+    if (argc<5 || argc>7 || parse_size(argv[2],&edits) ||
         parse_size(argv[3],&d) || parse_size(argv[4],&repeats) ||
         !d || !repeats || edits==SIZE_MAX) {
         help(stderr); return EXIT_FAILURE;
     }
+    for (argument=5;argument<argc;++argument) {
+        if (!strcmp(argv[argument],"--jaccard")) {
+            if (compute_jaccard) { help(stderr); return EXIT_FAILURE; }
+            compute_jaccard=1;
+        } else if (!table_path) table_path=argv[argument];
+        else { help(stderr); return EXIT_FAILURE; }
+    }
     if (scan_input(argv[1],edits,&maximum_length,&pairs)) goto done;
-    if (argc==5) {
+    if (!table_path) {
         size_t length=strlen(argv[1]);
         generated_path=malloc(length+5);
         if (!generated_path) goto done;
@@ -371,14 +388,15 @@ int ssh3_collisions_main(int argc,char **argv) {
         if (subseqhash3_table_file_create(
                 generated_path,maximum_length,d,repeats,seed)) goto done;
     }
-    if (subseqhash3_table_file_open(&tables,argc==6?argv[5]:generated_path))
+    if (subseqhash3_table_file_open(&tables,table_path?table_path:generated_path))
         goto done;
     if (tables.n<maximum_length || tables.d!=d || tables.count!=repeats) {
         fputs("table file dimensions do not match the input, D, and R\n",stderr);
         goto done;
     }
     fprintf(stderr,"backend: %s\n",subseqhash3_backend());
-    result=estimate(argv[1],edits,d,repeats,maximum_length,pairs,&tables)?
+    result=estimate(argv[1],edits,d,repeats,maximum_length,pairs,&tables,
+                    compute_jaccard)?
         EXIT_FAILURE:EXIT_SUCCESS;
 done:
     free(generated_path); subseqhash3_table_file_close(&tables);
