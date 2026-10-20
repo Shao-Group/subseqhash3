@@ -147,6 +147,40 @@ static void test_long_windows(void) {
     subseqhash3_tables_destroy(&tables);
 }
 
+static void test_one_substitution(void) {
+    size_t trial;
+    for (trial=0;trial<200;++trial) {
+        const size_t n=2+trial%6,deletions=trial%n;
+        const size_t total_edits=deletions+1;
+        const size_t d=trial%3?32*(1+trial%2):31;
+        uint8_t sequence[7];
+        SubseqHash3Tables tables={0};
+        SubseqHash3EditResult fixed={0},all[8]={0};
+        size_t i;
+        for (i=0;i<n;++i)
+            sequence[i]=(uint8_t)((trial*7+i*3+i*i)%4);
+        assert(!subseqhash3_tables_init(&tables,n,d,67890+trial));
+        assert(!subseqhash3_compute_one_substitution(
+            sequence,n,deletions,&tables,&fixed));
+        assert(!subseqhash3_compute_all_edit_splits(
+            sequence,n,total_edits,&tables,all));
+        assert(fixed.deletions==deletions);
+        assert(fixed.substitutions==1);
+        assert(fixed.length==all[1].length);
+        assert(fixed.psi==all[1].psi);
+        assert(fixed.omega==all[1].omega);
+        assert(!memcmp(fixed.seed,all[1].seed,fixed.length));
+        assert(!memcmp(fixed.positions,all[1].positions,
+                       fixed.length*sizeof(*fixed.positions)));
+        assert(!memcmp(fixed.substituted,all[1].substituted,fixed.length));
+        validate_result(sequence,0,n,&tables,&fixed);
+        validate_optimum(sequence,n,&tables,&fixed);
+        subseqhash3_edit_results_destroy(&fixed,1);
+        subseqhash3_edit_results_destroy(all,total_edits+1);
+        subseqhash3_tables_destroy(&tables);
+    }
+}
+
 static void test_table_file(void) {
     char path[]="/tmp/subseqhash3-tables-XXXXXX";
     const size_t n=7,d=32,count=2,cells=n*d*4;
@@ -198,6 +232,7 @@ int ssh3_test_main(int argc,char **argv) {
     assert(isnan(ssh3_edit_neighborhood_jaccard("AX","AC",0,0)));
     test_table_file();
     test_long_windows();
+    test_one_substitution();
     for (trial=0;trial<200;++trial) {
         const size_t n=3+trial%5,edits=trial%3;
         const size_t d=32*(1+trial%2);

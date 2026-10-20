@@ -32,6 +32,17 @@ int subseqhash3_compute_all_edit_splits(
     const uint8_t *sequence,size_t length,size_t total_edits,
     const SubseqHash3Tables *tables,SubseqHash3EditResult *results);
 
+/* Compute the optimized seed obtained with exactly one substitution and
+   `deletions` deletions (0 <= deletions < length). Input symbols are 0..3.
+   Matches results[1] of compute_all_edit_splits with total_edits=deletions+1,
+   including traceback ties. Tables must cover at least length input bases.
+   Returns 0 on success or -1 on invalid input/allocation failure. Pass an
+   empty result and release its allocations with edit_results_destroy(...,1).
+   AVX-512 builds vectorize all D>=32, including partial residue vectors. */
+int subseqhash3_compute_one_substitution(
+    const uint8_t *sequence,size_t length,size_t deletions,
+    const SubseqHash3Tables *tables,SubseqHash3EditResult *result);
+
 /* Results are window-major and then substitution count 0..E. Positions are
    absolute offsets in sequence. */
 int subseqhash3_compute_long_edit_splits(

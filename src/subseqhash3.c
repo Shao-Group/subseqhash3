@@ -971,6 +971,436 @@ int subseqhash3_compute_all_edit_splits(
     return compute_all_edit_splits_impl(s,n,total_edits,t,results,NULL);
 }
 
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+typedef struct {
+    const uint8_t *sequence;
+    const SubseqHash3Tables *tables;
+    const int16_t *minimum,*maximum;
+    uint32_t *memo;
+    uint8_t *parent;
+    size_t base,stride,band;
+} OneSubstitutionTail;
+
+/* Evaluate only suffix cells demanded by the requested final residue.
+   A parent byte 0xff cannot be a real decision (each nibble is 0..8),
+   and serves as the memoization marker without a separate validity array. */
+static uint32_t one_substitution_tail(OneSubstitutionTail *ctx,
+    size_t retained,size_t h,size_t e,size_t r) {
+    const SubseqHash3Tables *t=ctx->tables;
+    const size_t state=(2*h+e)*t->d+r;
+    size_t index;
+    uint8_t *parent;
+    unsigned lo=65535,hi=65535,low=0,high=0;
+    unsigned original,a,candidate;
+    if (retained==ctx->base) {
+        const size_t source=(2*h+e)*ctx->stride+r;
+        return (uint32_t)(uint16_t)ctx->minimum[source]|
+            ((uint32_t)(uint16_t)ctx->maximum[source]<<16);
+    }
+    index=(retained-ctx->base-1)*ctx->band+state;
+    parent=ctx->parent+(retained+h-1)*ctx->band+state;
+    if (*parent!=255) return ctx->memo[index];
+    if (h) {
+        const uint32_t value=one_substitution_tail(ctx,retained,h-1,e,r);
+        lo=value&65535u; hi=value>>16;
+    }
+    original=ctx->sequence[retained+h-1];
+    for (candidate=0;candidate<(e?4u:1u);++candidate) {
+        size_t source_e=e,q,table;
+        unsigned source_lo,source_hi;
+        uint32_t value;
+        int add;
+        a=original;
+        if (e && candidate<3) {
+            a=candidate+(candidate>=original);
+            source_e=0;
+        }
+        q=subtract_mod(r,t->C[4*(retained-1)+a],t->d);
+        value=one_substitution_tail(ctx,retained-1,h,source_e,q);
+        table=((retained-1)*4+a)*t->d+r;
+        add=t->signed_A[table];
+        if (t->B1[table]>0) {
+            source_lo=value&65535u; source_hi=value>>16;
+        } else {
+            source_lo=value>>16; source_hi=value&65535u;
+        }
+        if (source_lo!=65535u && source_lo+(unsigned)(127+add)<lo) {
+            lo=source_lo+(unsigned)(127+add);
+            low=a*2u+(t->B1[table]>0?1u:2u);
+        }
+        if (source_hi!=65535u && source_hi+(unsigned)(127-add)<hi) {
+            hi=source_hi+(unsigned)(127-add);
+            high=a*2u+(t->B1[table]>0?2u:1u);
+        }
+    }
+    *parent=(uint8_t)(low|(high<<4));
+    ctx->memo[index]=(uint32_t)lo|((uint32_t)hi<<16);
+    return ctx->memo[index];
+}
+
+/* A row is a retained prefix length, rather than an input prefix length.
+   Deleting the current input base comes from the preceding deletion band
+   in this SAME row. Keeping it comes from the previous retained row.
+   The residue loop encloses the deletion loop, so all deletion bands share
+   four table vectors and the deletion predecessor remains in L1. */
+/* Each plane holds a minimum nonnegative cost: 127*j + omega for the
+   minimum, 127*j - omega for the maximum. Unsigned saturating addition
+   preserves the unreachable sentinel without any reachability test. */
+static void one_substitution_retained_row(
+    const uint8_t *s,size_t retained,size_t deletions,
+    const SubseqHash3Tables *t,size_t stride,size_t band,
+    const int16_t *old_mn,const int16_t *old_mx,
+    int16_t *new_mn,int16_t *new_mx,uint8_t *parent) {
+    const size_t d=t->d,row=retained-1;
+    const __m512i infinity=_mm512_set1_epi16(-1);
+    const __m512i bias=_mm512_set1_epi16(127);
+    const __m256i high_mask=_mm256_set1_epi8((char)0xf0);
+    size_t r,h;
+    for (r=0;r<d;r+=32) {
+        const size_t lanes=d-r<32?d-r:32;
+        const __mmask32 active=lanes==32?(__mmask32)UINT32_MAX:
+            (__mmask32)((UINT32_C(1)<<lanes)-1);
+        __m512i plus[4],minus[4];
+        __mmask32 positive[4];
+        __m256i code[4];
+        size_t offset[4];
+        unsigned a;
+        for (a=0;a<4;++a) {
+            const size_t table=(row*4+a)*d;
+            const size_t shift=t->C[4*row+a];
+            const unsigned base=a*2u;
+            const __m512i add=_mm512_cvtepi8_epi16(
+                _mm256_maskz_loadu_epi8(active,t->signed_A+table+r));
+            offset[a]=r>=shift?r-shift:r+d-shift;
+            plus[a]=_mm512_add_epi16(bias,add);
+            minus[a]=_mm512_sub_epi16(bias,add);
+            positive[a]=(__mmask32)t->B1_masks[
+                (row*4+a)*t->blocks+r/32];
+            code[a]=_mm256_mask_blend_epi8(positive[a],
+                _mm256_set1_epi8((char)((base+2u)|((base+1u)<<4))),
+                _mm256_set1_epi8((char)((base+1u)|((base+2u)<<4))));
+        }
+        for (h=0;h<=deletions;++h) {
+            const unsigned original=s[row+h];
+            const size_t state=2*h*stride;
+            const size_t parent_state=(row+h)*band+2*h*d+r;
+            __m512i mn=h?_mm512_load_si512((const void *)(
+                new_mn+state-2*stride+r)):infinity;
+            __m512i mx=h?_mm512_load_si512((const void *)(
+                new_mx+state-2*stride+r)):infinity;
+            __m256i low=_mm256_setzero_si256();
+            __m256i high=_mm256_setzero_si256();
+#define ONE_COST_UPDATE(SYMBOL,SOURCE) do { \
+    const unsigned sym_=(SYMBOL); \
+    const size_t source_=(SOURCE)+offset[sym_]; \
+    const __m512i smn_=_mm512_loadu_si512( \
+        (const void *)(old_mn+source_)); \
+    const __m512i smx_=_mm512_loadu_si512( \
+        (const void *)(old_mx+source_)); \
+    const __m512i lo_=_mm512_adds_epu16( \
+        _mm512_mask_blend_epi16(positive[sym_],smx_,smn_),plus[sym_]); \
+    const __m512i hi_=_mm512_adds_epu16( \
+        _mm512_mask_blend_epi16(positive[sym_],smn_,smx_),minus[sym_]); \
+    const __mmask32 lm_=_mm512_cmplt_epu16_mask(lo_,mn); \
+    const __mmask32 hm_=_mm512_cmplt_epu16_mask(hi_,mx); \
+    low=_mm256_mask_mov_epi8(low,lm_,code[sym_]); \
+    high=_mm256_mask_mov_epi8(high,hm_,code[sym_]); \
+    mn=_mm512_min_epu16(mn,lo_); \
+    mx=_mm512_min_epu16(mx,hi_); \
+} while (0)
+#define ONE_COST_STORE(STATE,PARENT) do { \
+    _mm512_store_si512((void *)(new_mn+(STATE)+r),mn); \
+    _mm512_store_si512((void *)(new_mx+(STATE)+r),mx); \
+    _mm256_mask_storeu_epi8(parent+(PARENT),active, \
+        _mm256_ternarylogic_epi32(low,high,high_mask,0xd8)); \
+    if (!r && !(d&31u)) { \
+        _mm512_store_si512((void *)(new_mn+(STATE)+d),mn); \
+        _mm512_store_si512((void *)(new_mx+(STATE)+d),mx); \
+    } \
+} while (0)
+            ONE_COST_UPDATE(original,state);
+            ONE_COST_STORE(state,parent_state);
+            mn=h?_mm512_load_si512((const void *)(
+                new_mn+state-stride+r)):infinity;
+            mx=h?_mm512_load_si512((const void *)(
+                new_mx+state-stride+r)):infinity;
+            low=high=_mm256_setzero_si256();
+            /* Ascending changed symbols, then unchanged, preserve ties. */
+            if (original!=0) ONE_COST_UPDATE(0,state);
+            if (original!=1) ONE_COST_UPDATE(1,state);
+            if (original!=2) ONE_COST_UPDATE(2,state);
+            if (original!=3) ONE_COST_UPDATE(3,state);
+            ONE_COST_UPDATE(original,state+stride);
+            ONE_COST_STORE(state+stride,parent_state+d);
+#undef ONE_COST_STORE
+#undef ONE_COST_UPDATE
+        }
+    }
+    if (d&31u) {
+        /* The last partial vector overlaps the circular padding, so refresh
+           it only after all real residues have been written. */
+        for (h=0;h<=deletions;++h) {
+            size_t e;
+            for (e=0;e<2;++e) {
+                const size_t state=(h*2+e)*stride;
+                memcpy(new_mn+state+d,new_mn+state,32*sizeof(*new_mn));
+                memcpy(new_mx+state+d,new_mx+state,32*sizeof(*new_mx));
+            }
+        }
+    }
+}
+#endif
+
+/* With one retained base the deletion DP collapses to four candidates.
+   Only the earliest input position different from each output base matters. */
+static int one_substitution_single_base(const uint8_t *s,size_t n,
+    const SubseqHash3Tables *t,SubseqHash3EditResult *out) {
+    size_t first[4]={SIZE_MAX,SIZE_MAX,SIZE_MAX,SIZE_MAX};
+    size_t i,position=SIZE_MAX,psi=0;
+    unsigned symbol=0,a,b;
+    int score=0,found=0;
+    for (i=0;i<n;++i) if (first[s[i]]==SIZE_MAX) first[s[i]]=i;
+    for (a=0;a<4;++a) {
+        size_t at=SIZE_MAX;
+        const size_t residue=t->C[a];
+        const int value=t->signed_A[a*t->d+residue];
+        for (b=0;b<4;++b)
+            if (b!=a && first[b]<at) at=first[b];
+        if (at==SIZE_MAX) continue;
+        if (!found || residue>psi || (residue==psi &&
+            (abs(value)>abs(score) || (abs(value)==abs(score) &&
+             (value<score || (value==score &&
+              (at<position || (at==position && a<symbol)))))))) {
+            found=1; psi=residue; score=value; position=at; symbol=a;
+        }
+    }
+    out->seed=malloc(1);
+    out->positions=malloc(sizeof(*out->positions));
+    out->substituted=malloc(1);
+    if (!out->seed || !out->positions || !out->substituted) {
+        subseqhash3_edit_results_destroy(out,1);
+        return -1;
+    }
+    out->deletions=n-1; out->substitutions=out->length=1;
+    out->psi=psi; out->omega=score;
+    out->seed[0]=(uint8_t)symbol;
+    out->positions[0]=position; out->substituted[0]=1;
+    return 0;
+}
+
+int subseqhash3_compute_one_substitution(
+    const uint8_t *s,size_t n,size_t deletions,
+    const SubseqHash3Tables *t,SubseqHash3EditResult *out) {
+    size_t deletion_count,states,score_stride,score_band,band;
+    size_t score_cells,parent_cells,score_bytes;
+    size_t l,h,e,r,a,q,k;
+    int16_t *scores=NULL,*old_mn,*old_mx,*new_mn,*new_mx;
+    uint8_t *parent=NULL;
+    int status=-1,type;
+    if (!out) return -1;
+    memset(out,0,sizeof(*out));
+    /* At least one symbol must remain so that exactly one substitution is
+       possible. */
+    if (!t || !t->d || t->k<n || deletions>=n || (n&&!s) ||
+        deletions==SIZE_MAX) return -1;
+    for (l=0;l<n;++l) if (s[l]>3) return -1;
+    if (n-deletions==1) return one_substitution_single_base(s,n,t,out);
+    deletion_count=deletions+1;
+    if (deletion_count>SIZE_MAX/2) return -1;
+    states=deletion_count*2;
+    if (states>SIZE_MAX/t->d) return -1;
+    band=states*t->d;
+    score_stride=t->d;
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+    if (t->d>=32) {
+        if (t->d>SIZE_MAX-63) return -1;
+        score_stride=((t->d+31)&~(size_t)31)+32;
+    }
+#endif
+    if (states>SIZE_MAX/score_stride) return -1;
+    score_band=states*score_stride;
+    if (score_band>SIZE_MAX/(4*sizeof(*scores)) ||
+        (n&&band>SIZE_MAX/n))
+        return -1;
+    score_cells=4*score_band; parent_cells=n*band;
+    score_bytes=score_cells*sizeof(*scores);
+    if (parent_cells>SIZE_MAX-score_bytes) return -1;
+    scores=aligned_allocate(64,score_bytes+parent_cells);
+    if (!scores) return -1;
+    parent=(uint8_t *)scores+score_bytes;
+    if (score_stride==t->d) memset(parent,0,parent_cells);
+    old_mn=scores; old_mx=old_mn+score_band;
+    new_mn=old_mx+score_band; new_mx=new_mn+score_band;
+#define ONE_SCORE_STATE(H,E,R) ((((H)*2+(E))*score_stride)+(R))
+#define ONE_PARENT_STATE(H,E,R) ((((H)*2+(E))*t->d)+(R))
+#define ONE_PARENT(L,H,E,R) ((((L)-1)*band)+ONE_PARENT_STATE(H,E,R))
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+    if (score_stride!=t->d) {
+        const size_t seed_length=n-deletions;
+        /* Sparse suffix queries pay off for large residue spaces; for small
+           D a full vector sweep is cheaper than scalar memoization. */
+        const size_t tail=t->d<512?0:(seed_length<3?seed_length:3);
+        const size_t base=seed_length-tail;
+        size_t final_state;
+        OneSubstitutionTail ctx={0};
+        memset(old_mn,0xff,2*score_band*sizeof(*old_mn));
+        /* All leading-deletion prefixes are the same empty seed. */
+        for (h=0;h<=deletions;++h) {
+            const size_t state=ONE_SCORE_STATE(h,0,0);
+            old_mn[state]=old_mx[state]=0;
+            memcpy(old_mn+state+t->d,old_mn+state,32*sizeof(*old_mn));
+            memcpy(old_mx+state+t->d,old_mx+state,32*sizeof(*old_mx));
+        }
+        for (q=1;q<=base;++q) {
+            int16_t *tmp;
+            one_substitution_retained_row(s,q,deletions,t,score_stride,band,
+                old_mn,old_mx,new_mn,new_mx,parent);
+            tmp=old_mn; old_mn=new_mn; new_mn=tmp;
+            tmp=old_mx; old_mx=new_mx; new_mx=tmp;
+        }
+        final_state=ONE_SCORE_STATE(deletions,1,0);
+        if (!tail) {
+            const int bias=127*(int)seed_length;
+            for (r=0;r<t->d;++r) {
+                const unsigned lo=(uint16_t)old_mn[final_state+r];
+                const unsigned hi=(uint16_t)old_mx[final_state+r];
+                old_mn[final_state+r]=lo==65535u?I8_POSITIVE_INFINITY:
+                    (int16_t)((int)lo-bias);
+                old_mx[final_state+r]=hi==65535u?I8_NEGATIVE_INFINITY:
+                    (int16_t)(bias-(int)hi);
+            }
+            goto one_dp_complete;
+        }
+        if (band>SIZE_MAX/(tail*sizeof(*ctx.memo))) goto done;
+        ctx.memo=malloc(tail*band*sizeof(*ctx.memo));
+        if (!ctx.memo) goto done;
+        ctx.sequence=s; ctx.tables=t;
+        ctx.minimum=old_mn; ctx.maximum=old_mx;
+        ctx.parent=parent; ctx.base=base;
+        ctx.stride=score_stride; ctx.band=band;
+        for (q=base+1;q<=seed_length;++q)
+            for (h=0;h<=deletions;++h)
+                memset(parent+ONE_PARENT(q+h,h,0,0),255,2*t->d);
+        /* Output in the unused rolling buffer; the base row remains intact
+           while progressively smaller residues are queried, if necessary. */
+        memset(new_mn+final_state,0x7f,t->d*sizeof(*new_mn));
+        memset(new_mx+final_state,0x80,t->d*sizeof(*new_mx));
+        r=t->d;
+        while (r) {
+            const uint32_t value=one_substitution_tail(
+                &ctx,seed_length,deletions,1,--r);
+            const unsigned lo=value&65535u,hi=value>>16;
+            if (lo!=65535u) {
+                const int bias=127*(int)seed_length;
+                new_mn[final_state+r]=(int16_t)((int)lo-bias);
+                new_mx[final_state+r]=(int16_t)(bias-(int)hi);
+                break;
+            }
+        }
+        free(ctx.memo);
+        old_mn=new_mn; old_mx=new_mx;
+        goto one_dp_complete;
+    }
+#endif
+    memset(old_mn,0x7f,score_band*sizeof(*old_mn));
+    memset(old_mx,0x80,score_band*sizeof(*old_mx));
+    old_mn[ONE_SCORE_STATE(0,0,0)]=old_mx[ONE_SCORE_STATE(0,0,0)]=0;
+    for (l=1;l<=n;++l) {
+        const unsigned original=s[l-1];
+        const size_t max_h=(l-1)<deletions?(l-1):deletions;
+        memset(new_mn,0x7f,score_band*sizeof(*new_mn));
+        memset(new_mx,0x80,score_band*sizeof(*new_mx));
+        /* A zero parent code means that this input symbol was deleted. */
+        if (deletions)
+            for (h=0;h<=max_h && h<deletions;++h) {
+                const size_t retained=(l-1)-h;
+                for (e=0;e<=1 && e<=retained;++e) {
+                    const size_t src=ONE_SCORE_STATE(h,e,0);
+                    const size_t dst=ONE_SCORE_STATE(h+1,e,0);
+                    memcpy(new_mn+dst,old_mn+src,t->d*sizeof(*new_mn));
+                    memcpy(new_mx+dst,old_mx+src,t->d*sizeof(*new_mx));
+                }
+            }
+        /* Substitution candidates are visited before an unchanged candidate
+           reaches the same e=1 destination.  This matches the strict-update
+           tie breaking used by compute_all_edit_splits. */
+        for (h=0;h<=max_h;++h) {
+            const size_t row=(l-1)-h;
+            const size_t original_base=(row*4+original)*t->d;
+            const size_t src=ONE_SCORE_STATE(h,0,0);
+            const size_t dst=ONE_SCORE_STATE(h,0,0);
+            update_shifted(old_mn+src,old_mx+src,new_mn+dst,new_mx+dst,
+                t->A+original_base,t->B1+original_base,t->B2+original_base,
+                t->signed_A+original_base,
+                t->B1_masks+(row*4+original)*t->blocks,t->wrap_indices,
+                parent+ONE_PARENT(l,h,0,0),t->d,t->C[4*row+original],
+                original);
+            for (a=0;a<4;++a) if (a!=original) {
+                const size_t table_base=(row*4+a)*t->d;
+                update_shifted(old_mn+src,old_mx+src,
+                    new_mn+ONE_SCORE_STATE(h,1,0),
+                    new_mx+ONE_SCORE_STATE(h,1,0),
+                    t->A+table_base,t->B1+table_base,t->B2+table_base,
+                    t->signed_A+table_base,
+                    t->B1_masks+(row*4+a)*t->blocks,t->wrap_indices,
+                    parent+ONE_PARENT(l,h,1,0),t->d,t->C[4*row+a],
+                    (unsigned)a);
+            }
+            if (row) {
+                const size_t kept=ONE_SCORE_STATE(h,1,0);
+                update_shifted(old_mn+kept,old_mx+kept,
+                    new_mn+kept,new_mx+kept,
+                    t->A+original_base,t->B1+original_base,
+                    t->B2+original_base,t->signed_A+original_base,
+                    t->B1_masks+(row*4+original)*t->blocks,
+                    t->wrap_indices,parent+ONE_PARENT(l,h,1,0),t->d,
+                    t->C[4*row+original],original);
+            }
+        }
+        { int16_t *tmp=old_mn; old_mn=new_mn; new_mn=tmp;
+          tmp=old_mx; old_mx=new_mx; new_mx=tmp; }
+    }
+#if HAVE_AVX512_I8_DP && defined(__AVX512VL__)
+one_dp_complete:
+#endif
+    k=n-deletions;
+    r=t->d;
+    while (r && old_mn[ONE_SCORE_STATE(deletions,1,r-1)]==
+           I8_POSITIVE_INFINITY) --r;
+    if (!r) goto done;
+    --r;
+    out->deletions=deletions; out->substitutions=1; out->length=k;
+    out->seed=malloc(k); out->positions=malloc(k*sizeof(*out->positions));
+    out->substituted=malloc(k);
+    if (!out->seed || !out->positions || !out->substituted) goto done;
+    out->psi=r;
+    type=llabs((long long)old_mn[ONE_SCORE_STATE(deletions,1,r)])>=
+         llabs((long long)old_mx[ONE_SCORE_STATE(deletions,1,r)])?1:2;
+    out->omega=(double)(type==1?
+        old_mn[ONE_SCORE_STATE(deletions,1,r)]:
+        old_mx[ONE_SCORE_STATE(deletions,1,r)]);
+    l=n; h=deletions; e=1; q=k;
+    while (q) {
+        const uint8_t packed=parent[ONE_PARENT(l,h,e,r)];
+        unsigned code=type==1?(packed&15u):(packed>>4);
+        if (!code) { --h; --l; continue; }
+        --code; a=code/2u; type=(int)(code%2u)+1;
+        out->seed[q-1]=(uint8_t)a; out->positions[q-1]=l-1;
+        out->substituted[q-1]=(uint8_t)(a!=s[l-1]);
+        if (a!=s[l-1]) --e;
+        r=subtract_mod(r,t->C[4*(q-1)+a],t->d);
+        --q; --l;
+    }
+    status=0;
+done:
+    if (status) subseqhash3_edit_results_destroy(out,1);
+    free(scores);
+    return status;
+#undef ONE_PARENT
+#undef ONE_PARENT_STATE
+#undef ONE_SCORE_STATE
+}
+
 int subseqhash3_compute_long_edit_splits(
     const uint8_t *s,size_t N,size_t n,size_t total_edits,
     const SubseqHash3Tables *t,SubseqHash3EditResult *results) {
