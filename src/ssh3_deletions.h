@@ -2,6 +2,7 @@
 #define SSH3_DELETIONS_H
 #include <stddef.h>
 #include <stdint.h>
+#include "ssh3_pivots.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,12 +30,18 @@ typedef struct {
 } SubseqHash3DeletionResult;
 typedef struct SubseqHash3DeletionWorkspace SubseqHash3DeletionWorkspace;
 
-/* Empty table on entry; 1<=k<=256, D>0. Initialization uses large integer
-   magnitudes like SubseqHash2. Import reads its ORIGINAL text-table format,
+/* Empty table on entry; 1<=k<=256, D>0. Initialization uses the SAME
+   parameters as pivot_tables_init(k+1,D,seed), with lossless widening to int64.
+   Import reads the ORIGINAL SubseqHash2 text-table format,
    including the final pivot permutation (validated, but API pivots are explicit).
    Imported magnitudes must be <= INT64_MAX/(4*k), ensuring exact arithmetic. */
 int subseqhash3_deletion_tables_init(SubseqHash3DeletionTables *,size_t k,
     size_t residues,uint64_t seed);
+/* Copy the exact parameters of a common pivot family into owned arrays.
+   B2 is folded into A; source remains independently owned and unchanged.
+   Side traversal still follows the deletion API's original SubseqHash2 order. */
+int subseqhash3_deletion_tables_from_pivots(SubseqHash3DeletionTables *,
+    const SubseqHash3PivotTables *);
 int subseqhash3_deletion_tables_import(SubseqHash3DeletionTables *,
     const char *path,size_t k,size_t residues);
 void subseqhash3_deletion_tables_destroy(SubseqHash3DeletionTables *);

@@ -19,16 +19,20 @@ static void help(FILE *stream) {
     fputs("Generate reusable SubseqHash3 or pivot table sets.\n\n"
           "Usage:\n  subseqhash3 tables n D R OUTPUT [--pivots] [--seed SEED]\n\n"
           "Arguments:\n"
-          "  n       Maximum supported sequence or window length.\n"
+          "  n       Legacy: maximum sequence/window length.\n"
+          "          With --pivots: n-1 rows/orders per family (2<=n<=257).\n"
           "  D       Number of hash residues.\n"
           "  R       Legacy: number of independent table sets.\n"
           "          With --pivots: number of requested seed repetitions.\n"
           "  OUTPUT  Destination binary table file.\n\n"
           "Options:\n"
           "  --seed SEED  Use a reproducible unsigned random seed.\n"
-          "  --pivots     Make tables for 'repeats': ceil(R/(n-1)) families,\n"
+          "  --pivots     Shared tables for repeats/deletions: ceil(R/(n-1)) families,\n"
           "               each containing n-1 pivot orders; requires 2<=n<=257.\n\n"
-          "Default legacy files work with 'seeds', not 'repeats'. Pivot files\n"
+          "repeats requires n>=W and enough families for R repetitions.\n"
+          "deletions requires n-1>=W-E, uses the first family, and R<=W-E.\n"
+          "For E=0 deletions, generate n>=W+1.\n\n"
+          "Default legacy files work with seeds/collisions. Pivot files\n"
           "store both side tables and pivot parameters in a distinct format.\n",
           stream);
 }

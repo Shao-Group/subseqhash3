@@ -17,6 +17,69 @@
 #include "ssh3_deletions.h"
 #include "subseqhash2seeding.h"
 
+// Original-scale fixture generator from commit 3820eaf. Production defaults
+// now use the common pivot generator; preserve the recorded benchmark inputs.
+static uint64_t random64(uint64_t *s) {
+    uint64_t z=(*s+=UINT64_C(0x9e3779b97f4a7c15));
+    z=(z^(z>>30))*UINT64_C(0xbf58476d1ce4e5b9);
+    z=(z^(z>>27))*UINT64_C(0x94d049bb133111eb);
+    return z^(z>>31);
+}
+static void permutation4(unsigned *p,uint64_t *seed) {
+    size_t a;
+    for (a=0;a<4;++a) p[a]=(unsigned)a;
+    for (a=4;a>1;--a) {
+        const size_t q=(size_t)(random64(seed)%a);
+        const unsigned tmp=p[a-1]; p[a-1]=p[q]; p[q]=tmp;
+    }
+}
+static void residue_row(size_t *c,size_t d,uint64_t *seed) {
+    size_t a,b;
+    if (d<4) {
+        unsigned p[4]; permutation4(p,seed);
+        for (a=0;a<4;++a) c[a]=p[a]%d;
+    } else for (a=0;a<4;++a) {
+        do {
+            c[a]=(size_t)(random64(seed)%d);
+            for (b=0;b<a;++b) if (c[b]==c[a]) break;
+        } while (b<a);
+    }
+}
+static int init_reference_tables(SubseqHash3DeletionTables *t,size_t k,
+    size_t d,uint64_t seed) {
+    size_t i,side,q,a;
+    uint64_t limit;
+    if (subseqhash3_deletion_tables_init(t,k,d,seed)) return -1;
+    limit=(uint64_t)(INT64_MAX/4)/(uint64_t)k;
+    if (limit>(UINT64_C(1)<<55)) limit=UINT64_C(1)<<55;
+    for (side=0;side<2;++side) {
+        SubseqHash3DeletionSide *s=side?&t->right:&t->left;
+        for (i=0;i<k;++i) {
+            for (q=0;q<d;++q) {
+                unsigned p[4]; permutation4(p,&seed);
+                for (a=0;a<4;++a) {
+                    const size_t at=(4*i+a)*d+q;
+                    const int64_t value=(int64_t)((UINT64_C(1)<<45)+random64(&seed)%(limit-(UINT64_C(1)<<45)+1));
+                    s->A[at]=(p[a]&2)?value:-value;
+                    s->B1[at]=(p[a]&1)?1:-1;
+                }
+            }
+            residue_row(s->C+4*i,d,&seed);
+        }
+    }
+    for (i=0;i<k;++i) {
+        unsigned p[4],signs[4]; permutation4(p,&seed); permutation4(signs,&seed);
+        residue_row(t->pivot_C+4*i,d,&seed);
+        for (a=0;a<4;++a) {
+            const int64_t value=(int64_t)((UINT64_C(1)<<45)+random64(&seed)%(limit-(UINT64_C(1)<<45)+1));
+            t->pivot_A[4*i+a]=(signs[a]&1)?value:-value;
+            t->left_sign[4*i+a]=(p[a]&2)?1:-1;
+            t->right_sign[4*i+a]=(p[a]&1)?1:-1;
+        }
+    }
+    return 0;
+}
+
 static void write_table(const SubseqHash3DeletionTables &t,const char *path) {
     FILE *f=fopen(path,"w"); assert(f);
     for (int side=0;side<2;++side) {
@@ -60,7 +123,7 @@ static void original_validate(const std::vector<std::vector<seed>> &old,
 static void run(size_t n,size_t e,size_t d,size_t count,bool check_only,const char *fixture=nullptr) {
     const size_t k=n-e,batch=16;
     SubseqHash3DeletionTables tables={},loaded={};
-    assert(!subseqhash3_deletion_tables_init(&tables,k,d,12+n+e+d));
+    assert(!init_reference_tables(&tables,k,d,12+n+e+d));
     if (fixture) {
         subseqhash3_deletion_tables_destroy(&tables);
         assert(!subseqhash3_deletion_tables_import(&tables,fixture,k,d));

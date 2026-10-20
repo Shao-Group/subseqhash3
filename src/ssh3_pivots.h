@@ -2,6 +2,9 @@
 #define SSH3_PIVOTS_H
 
 #include "subseqhash3.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* ABC^k order family for k=n-1 output bases. Unlike the original paper,
    sides are read from the outer boundaries toward the pivot: the left
@@ -52,4 +55,7 @@ int subseqhash3_compute_pivot_repeats_with_workspace(const uint8_t *sequence,
     size_t table_count,size_t repeats,SubseqHash3EditResult *results,
     SubseqHash3PivotWorkspace *workspace);
 
+#ifdef __cplusplus
+}
+#endif
 #endif

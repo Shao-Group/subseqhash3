@@ -4,16 +4,23 @@ The separate `src/ssh3_deletions.h` / `src/ssh3_deletions.c` API produces
 length-k seeds, where k=n-E, with **exactly E deletions and no substitutions**.
 One call returns minimizers for up to k requested pivot orders, sharing its
 side DPs across the orders. Existing one-substitution and mixed-edit pivot
-algorithms and their tables are unchanged.
+algorithms are unchanged. Both commands now use the same binary pivot tables
+and default generator; the deletion kernel widens their parameters losslessly
+to its internal 64-bit representation.
 
 ## CLI
 
 ```sh
 make simd
-# W=30, E=5: request ten of the k=25 orders per sliding window.
-build/simd/subseqhash3 deletions input.seq 30 5 11 10 seeds.csv --seed 42
-# All 25 orders, using an ORIGINAL SubseqHash2 text table for k=25,D=11.
-build/simd/subseqhash3 deletions input.seq 30 5 11 25 seeds.csv original-table.txt
+# Generate once, reuse the exact same file in both commands.
+build/simd/subseqhash3 tables 30 11 10 shared.piv --pivots --seed 42
+build/simd/subseqhash3 repeats input.seq 30 5 11 10 repeats.csv shared.piv
+build/simd/subseqhash3 deletions input.seq 30 5 11 10 deletions.csv shared.piv
+# Or request all k=25 deletion-only orders from that same first family.
+build/simd/subseqhash3 deletions input.seq 30 5 11 25 all.csv shared.piv
+# Original SubseqHash2 text-table import remains an explicit option.
+build/simd/subseqhash3 deletions input.seq 30 5 11 25 original.csv \
+  --subseqhash2-tables original-table.txt
 ```
 
 Use `make` and `build/subseqhash3` for the scalar build. AVX-512F/BW/VL
@@ -22,6 +29,7 @@ seeding is single-threaded.
 
 ```text
 subseqhash3 deletions INPUT W E D R OUTPUT [TABLE_FILE] [--seed SEED]
+                     [--subseqhash2-tables TEXT_FILE]
 ```
 
 W is 1..256, 0<=E<W, D>0, and 1<=R<=W-E. R selects numeric pivots
@@ -31,24 +39,54 @@ permutation is validated but does not reorder the numeric pivots; to
 reproduce the original program's subsampling, pass its selected pivots to
 the C API explicitly.
 
+TABLE_FILE is the **same version-1 binary `.piv` format** produced by
+`tables --pivots` and accepted by `repeats`. Existing files remain valid.
+A file generated with `tables n D R ... --pivots` has n-1 rows per family:
+
+- `repeats` requires n>=W, matching D, and enough families for its repetitions.
+- `deletions` requires n-1>=W-E and matching D. It uses only the first family;
+  additional families are harmless. Its R can be any value up to W-E,
+  independently of the R used when creating the file.
+- Zero-deletion windows need W retained rows, so generate n>=W+1. For example,
+  `tables 31 11 10 shared.piv --pivots` supports W=30,E=0 deletion seeding.
+
+The file dimension is row capacity, not an edit budget. A table with n=30
+supports deletion-only length k<=29, including W=30,E=5 (k=25). The shared
+parameters do not change the existing algorithms' different side traversals;
+using one file does not make their minimizers identical.
+
 INPUT contains one A/C/G/T sequence per line, either case, with LF or CRLF
 endings. Empty lines, non-DNA symbols (including N), and lines shorter than
 W are rejected. Windows advance one base. Tables are initialized once and
-reused for all windows and input sequences. Without TABLE_FILE, `--seed`
-makes generation reproducible; otherwise a random generation seed is printed
-to stderr. `--seed` and TABLE_FILE cannot be combined. No table file is
-created automatically: repeat a generated run using its printed seed.
+reused for all windows and input sequences. Without TABLE_FILE, shared tables
+are created in `OUTPUT.piv`, just as with `repeats`. The saved file can be
+supplied explicitly to reproduce the run. `--seed` selects reproducible
+creation; otherwise the randomized generation seed is printed to stderr.
+Automatic creation stores one family with n=W for E>=1, and n=W+1 for E=0.
+For E>=1, the resulting file also supports `repeats` at the same W.
 
-TABLE_FILE is the original SubseqHash2 text format, for k=W-E and D. The
-`tables` and `tables --pivots` binary formats serve the other APIs and are
-not compatible with this importer. Imported magnitudes must be positive and
-at most `INT64_MAX/(4*k)`; signs, residues, final permutation, integer overflow,
-truncation, and trailing data are checked. Existing SubseqHash2 magnitudes
-(up to 2^55 with k<=64) fit this bound, except the exact upper endpoint at
-k=64. The importer preserves all table parameters; it does not rescale scores.
-Generated tables retain the original construction's four sign combinations
-and distinct base residues when D>=4, with deterministic SplitMix64 randomness;
-a numeric seed does not reproduce the original program's random generator.
+For example:
+
+```sh
+build/simd/subseqhash3 deletions input.seq 30 5 11 10 first.csv --seed 42
+build/simd/subseqhash3 deletions input.seq 30 5 11 10 again.csv first.csv.piv
+build/simd/subseqhash3 repeats input.seq 30 5 11 10 mixed.csv first.csv.piv
+```
+
+To use an original SubseqHash2 text table, supply `--subseqhash2-tables FILE`
+with k=W-E and matching D. This replaces the earlier positional-text-file
+syntax. TEXT_FILE, a positional shared TABLE_FILE, and `--seed` are mutually
+exclusive. The legacy `tables` binary format for seeds/collisions remains
+separate and cannot supply pivot orders.
+
+Original text magnitudes must be positive and at most `INT64_MAX/(4*k)`;
+signs, residues, final permutation, integer overflow, truncation, and trailing
+data are checked. Import preserves the original large parameters without
+rescaling. Shared tables use magnitudes 1..127, exactly as `repeats` does.
+Consequently the default deletion-only parameters and `--seed` outputs have
+changed from the earlier large-magnitude generator; import original text
+parameters when reproducing those orders. The recorded large-magnitude
+benchmark fixtures remain separate from production table generation.
 
 CSV columns are:
 
@@ -60,7 +98,7 @@ Indices are zero-based. Rows are sequence-major, window-major, then
 pivot-major. Seed strings are uppercase and have W-E bases. Each length-L
 input line emits `(L-W+1)*R` data rows. Psi and omega are exact integers;
 omega is never converted through floating point. The C API additionally
-returns the source positions. OUTPUT must not alias INPUT or TABLE_FILE,
+returns the source positions. OUTPUT must not alias INPUT or TABLE_FILE (or TEXT_FILE),
 including hard links. Invalid table files are rejected before OUTPUT is
 opened; later input or I/O failures can leave a partial CSV. Wall time
 printed to stderr includes table initialization/loading and CSV I/O.
@@ -87,8 +125,14 @@ subseqhash3_deletion_tables_destroy(&tables);
 
 Table initialization/import and seed-computation functions return 0 on success
 and -1 on invalid input/allocation failure.
-Pass empty results and table objects. Tables can cover a larger k than the
-current output; D is fixed by the tables. An explicit pivot array can select
+Pass empty results and table objects. `deletion_tables_init(k,D,seed)` uses
+exactly the parameters of `pivot_tables_init(k+1,D,seed)`. To use an already
+loaded shared family, call `subseqhash3_pivot_table_file_open()`, then
+`subseqhash3_deletion_tables_from_pivots(&tables, file.tables)`. This creates
+independently owned arrays; the shared file object may then be closed.
+No score rescaling or change of side signs/residues occurs.
+
+Tables can cover a larger k than the current output; D is fixed by the tables. An explicit pivot array can select
 any subset in any order, including duplicate pivots; NULL selects 0..count-1.
 The convenience `subseqhash3_compute_deletion_seeds()` owns a temporary
 workspace. Reusing the workspace avoids repeated DP allocation; workspaces
@@ -195,6 +239,15 @@ ASAN_OPTIONS=detect_leaks=0 make BUILD_DIR=build/deletions-sanitize \
   LDFLAGS='-fsanitize=address,undefined' check-deletions
 ```
 
+Shared-table regression checks additionally compare every widened parameter,
+use one file with both CLI commands, and compare default/reused-file CSVs
+against direct API results. They check n-1>=W-E (including tables smaller than
+W), E=0 generation at n=W+1, mismatched D, wrong file formats, automatic-file
+hard-link aliases, source lifetime, and minimum/maximum row capacities. At D=1024, an
+executable-level test reused one file across both commands: 140 CSV rows per
+command matched between scalar and SIMD, and automatic generation reproduced
+the explicit file and deletion CSV byte-for-byte.
+
 On 2026-10-20 the scalar and SIMD full test suites, existing single-seed/pivot
 checks, and scalar/SIMD ASan/UBSan deletion tests passed. Leak detection was
 disabled because LeakSanitizer cannot run under this environment's tracing.
@@ -217,6 +270,11 @@ make BUILD_DIR=build/deletions-simd \
 taskset -c 0 build/deletions-simd/bench-deletions \
   --samples bench/deletions-samples.csv > bench/deletions-results.csv
 ```
+
+These recorded results use the original large-magnitude fixture generator
+from commit `3820eaf`. `bench/deletions.cpp` retains that generator privately
+to keep these comparisons reproducible after production generation was unified;
+these are not timing claims for the new default small-magnitude tables.
 
 Each case uses 16 deterministic input sequences, with four passes per sample
 and five alternating old/new samples; times are medians in microseconds per

@@ -118,7 +118,7 @@ clean: clean-simd
 -include $(DEPS)
 
 .PHONY: check-deletions
-$(BUILD_DIR)/check-deletions: tests/deletions.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_deletions_cli.o
+$(BUILD_DIR)/check-deletions: tests/deletions.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_deletions_cli.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o $(BUILD_DIR)/pivot_table_file.o $(BUILD_DIR)/ssh3_tables.o $(BUILD_DIR)/table_file.o $(BUILD_DIR)/ssh3_repeats.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 check-deletions: $(BUILD_DIR)/check-deletions
@@ -128,7 +128,7 @@ check-deletions: $(BUILD_DIR)/check-deletions
 SUBSEQHASH2_DIR ?= subseqhash2
 CXX ?= c++
 DELETION_CXXFLAGS ?= $(filter-out -std=c99,$(CFLAGS)) -std=c++11
-$(BUILD_DIR)/bench-deletions: bench/deletions.cpp $(BUILD_DIR)/ssh3_deletions.o $(SUBSEQHASH2_DIR)/src/subseqhash2seeding.cpp $(SUBSEQHASH2_DIR)/src/seeding.cpp
+$(BUILD_DIR)/bench-deletions: bench/deletions.cpp $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o $(SUBSEQHASH2_DIR)/src/subseqhash2seeding.cpp $(SUBSEQHASH2_DIR)/src/seeding.cpp
 	$(CXX) $(CPPFLAGS) -I$(SUBSEQHASH2_DIR)/src $(DELETION_CXXFLAGS) -include cstdint -include cstdio -include string $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 .PHONY: bench-deletions check-deletions-reference

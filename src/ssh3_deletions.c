@@ -13,12 +13,6 @@
 #endif
 #define INF (INT64_MAX/2)
 
-static uint64_t random64(uint64_t *s) {
-    uint64_t z=(*s+=UINT64_C(0x9e3779b97f4a7c15));
-    z=(z^(z>>30))*UINT64_C(0xbf58476d1ce4e5b9);
-    z=(z^(z>>27))*UINT64_C(0x94d049bb133111eb);
-    return z^(z>>31);
-}
 static size_t submod(size_t a,size_t b,size_t d) { return a>=b?a-b:d-(b-a); }
 static size_t addmod(size_t a,size_t b,size_t d) { return a>=d-b?a-(d-b):a+b; }
 static int tables_allocate(SubseqHash3DeletionTables *t,size_t k,size_t d) {
@@ -44,59 +38,53 @@ void subseqhash3_deletion_tables_destroy(SubseqHash3DeletionTables *t) {
     free(t->pivot_A); free(t->pivot_C); free(t->left_sign); free(t->right_sign);
     memset(t,0,sizeof(*t));
 }
-static void permutation4(unsigned *p,uint64_t *seed) {
-    size_t a;
-    for (a=0;a<4;++a) p[a]=(unsigned)a;
-    for (a=4;a>1;--a) {
-        const size_t q=(size_t)(random64(seed)%a);
-        const unsigned tmp=p[a-1]; p[a-1]=p[q]; p[q]=tmp;
+int subseqhash3_deletion_tables_from_pivots(SubseqHash3DeletionTables *t,
+    const SubseqHash3PivotTables *source) {
+    size_t side,i;
+    if (!t || !source || !source->k || source->k>256 || !source->d ||
+        source->left.k<source->k || source->right.k<source->k ||
+        source->left.d!=source->d || source->right.d!=source->d ||
+        !source->left.A || !source->right.A || !source->left.B1 ||
+        !source->right.B1 || !source->left.B2 || !source->right.B2 ||
+        !source->left.C || !source->right.C || !source->pivot_A ||
+        !source->pivot_C || !source->pivot_left_sign || !source->pivot_right_sign)
+        return -1;
+    if (tables_allocate(t,source->k,source->d)) return -1;
+    for (side=0;side<2;++side) {
+        const SubseqHash3Tables *s=side?&source->right:&source->left;
+        SubseqHash3DeletionSide *dst=side?&t->right:&t->left;
+        for (i=0;i<4*t->k*t->d;++i) {
+            if (s->A[i]<1 || (s->B1[i]!=1 && s->B1[i]!=-1) ||
+                (s->B2[i]!=1 && s->B2[i]!=-1)) goto invalid;
+            dst->A[i]=(int64_t)s->A[i]*s->B2[i]; dst->B1[i]=s->B1[i];
+        }
+        for (i=0;i<4*t->k;++i) {
+            if (s->C[i]>=t->d) goto invalid;
+            dst->C[i]=s->C[i];
+        }
     }
-}
-static void residue_row(size_t *c,size_t d,uint64_t *seed) {
-    size_t a,b;
-    if (d<4) {
-        unsigned p[4]; permutation4(p,seed);
-        for (a=0;a<4;++a) c[a]=p[a]%d;
-    } else for (a=0;a<4;++a) {
-        do {
-            c[a]=(size_t)(random64(seed)%d);
-            for (b=0;b<a;++b) if (c[b]==c[a]) break;
-        } while (b<a);
+    for (i=0;i<4*t->k;++i) {
+        if (!source->pivot_A[i] || source->pivot_A[i]==INT8_MIN ||
+            (source->pivot_left_sign[i]!=1 && source->pivot_left_sign[i]!=-1) ||
+            (source->pivot_right_sign[i]!=1 && source->pivot_right_sign[i]!=-1) ||
+            source->pivot_C[i]>=t->d) goto invalid;
+        t->pivot_A[i]=source->pivot_A[i]; t->pivot_C[i]=source->pivot_C[i];
+        t->left_sign[i]=source->pivot_left_sign[i];
+        t->right_sign[i]=source->pivot_right_sign[i];
     }
+    return 0;
+invalid:
+    subseqhash3_deletion_tables_destroy(t); return -1;
 }
 int subseqhash3_deletion_tables_init(SubseqHash3DeletionTables *t,size_t k,
     size_t d,uint64_t seed) {
-    size_t i,side,q,a;
-    uint64_t limit;
-    if (tables_allocate(t,k,d)) return -1;
-    limit=(uint64_t)(INT64_MAX/4)/(uint64_t)k;
-    if (limit>(UINT64_C(1)<<55)) limit=UINT64_C(1)<<55;
-    for (side=0;side<2;++side) {
-        SubseqHash3DeletionSide *s=side?&t->right:&t->left;
-        for (i=0;i<k;++i) {
-            for (q=0;q<d;++q) {
-                unsigned p[4]; permutation4(p,&seed);
-                for (a=0;a<4;++a) {
-                    const size_t at=(4*i+a)*d+q;
-                    const int64_t value=(int64_t)((UINT64_C(1)<<45)+random64(&seed)%(limit-(UINT64_C(1)<<45)+1));
-                    s->A[at]=(p[a]&2)?value:-value;
-                    s->B1[at]=(p[a]&1)?1:-1;
-                }
-            }
-            residue_row(s->C+4*i,d,&seed);
-        }
-    }
-    for (i=0;i<k;++i) {
-        unsigned p[4],signs[4]; permutation4(p,&seed); permutation4(signs,&seed);
-        residue_row(t->pivot_C+4*i,d,&seed);
-        for (a=0;a<4;++a) {
-            const int64_t value=(int64_t)((UINT64_C(1)<<45)+random64(&seed)%(limit-(UINT64_C(1)<<45)+1));
-            t->pivot_A[4*i+a]=(signs[a]&1)?value:-value;
-            t->left_sign[4*i+a]=(p[a]&2)?1:-1;
-            t->right_sign[4*i+a]=(p[a]&1)?1:-1;
-        }
-    }
-    return 0;
+    SubseqHash3PivotTables shared={0};
+    int status;
+    if (!t || !k || k>256 || !d) return -1;
+    if (subseqhash3_pivot_tables_init(&shared,k+1,d,seed)) return -1;
+    status=subseqhash3_deletion_tables_from_pivots(t,&shared);
+    subseqhash3_pivot_tables_destroy(&shared);
+    return status;
 }
 /* Bound numeric conversion explicitly; scanf integer overflow is undefined. */
 static int read_integer(FILE *in,int64_t *value) {

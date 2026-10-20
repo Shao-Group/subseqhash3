@@ -49,17 +49,25 @@ All seeding remains single-threaded. See [CLI and table-format details](bench/RE
 
 ## Deletion-only SubseqHash2 seeds
 
-Generate ten of the k=25 original SubseqHash2 pivot orders for every length-30
-window, deleting exactly five bases and making no substitutions:
+Generate one shared table file for both mixed-edit and deletion-only seeding:
 
 ```sh
-build/subseqhash3 deletions input.seq 30 5 11 10 seeds.csv --seed 42
+build/subseqhash3 tables 30 11 10 shared.piv --pivots --seed 42
+build/subseqhash3 repeats input.seq 30 5 11 10 mixed.csv shared.piv
+build/subseqhash3 deletions input.seq 30 5 11 10 deletions.csv shared.piv
 ```
 
-Use `make simd` and `build/simd/subseqhash3` for acceleration. An optional
-original SubseqHash2 text table can replace `--seed 42`. This separate path
-preserves the original side directions and exact 64-bit scores. It supports
-up to k=W-E seeds per call, and leaves the mixed-edit algorithms intact.
+`deletions` removes exactly E bases without substitutions and returns up to
+k=W-E seeds. Shared tables need n-1>=k and matching D; only the first family
+is used. For zero deletions, generate n>=W+1. Without a table argument,
+`deletions` creates `OUTPUT.piv`; `--seed 42` makes creation reproducible.
+Original SubseqHash2 text tables remain available through
+`--subseqhash2-tables FILE`.
+
+Use `make simd` and `build/simd/subseqhash3` for acceleration. This path
+preserves the original SubseqHash2 side directions and exact 64-bit arithmetic,
+while widening the shared small-magnitude parameters without loss. The
+mixed-edit algorithms keep their existing behavior.
 See [algorithm, API, correctness, and measured speedups](bench/DELETIONS.md).
 
 ## Added APIs
@@ -93,7 +101,9 @@ in version control so a fresh checkout can build.
 The deletion-only API in `src/ssh3_deletions.h` has its own tables, reusable
 workspace, and `SubseqHash3DeletionResult` with an integer omega. Free these
 results with `subseqhash3_deletion_results_destroy()`; original SubseqHash2
-text tables can be loaded with `subseqhash3_deletion_tables_import()`.
+text tables can be loaded with `subseqhash3_deletion_tables_import()`. Shared
+pivot families are copied with `subseqhash3_deletion_tables_from_pivots()`;
+both initializers generate the same parameters at matching row capacities.
 
 ## Benchmarks and validation
 
