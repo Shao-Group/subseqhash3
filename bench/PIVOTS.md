@@ -94,6 +94,48 @@ batch. No speedup is guaranteed for every r: at r=1 there is no computation
 to share, and at large D the new algorithm can be slower than the earlier
 single-seed function.
 
+### Follow-up exact optimization
+
+The follow-up implementation keeps the API, orders, budgets, and deterministic
+witness tie rules unchanged. It visits states by retained length, keeping the
+two deletion planes on the same table row. The SIMD kernel assigns named
+registers to the three changed symbols and the unchanged symbol, removing
+base-selection branches from the substitution-count loop. An aligned local
+copy of immutable DP metadata lets the compiler keep layout calculations out
+of the score arrays' alias set.
+
+For D>64 the kernel records scores but no parent decisions. Traceback recovers
+only the requested witnesses by checking the stored predecessor scores in the
+original tie order: deletion, changed symbols in ascending order, unchanged.
+For D<=64 it keeps packed parents, because predecessor recomputation costs more
+than recording such small states. Circular padding uses one unaligned vector
+copy for D>=31; only 31 wrapped elements are required by 32-lane loads.
+
+Pivot selection now evaluates join scores without tracking a residue index
+per SIMD lane. Only after choosing the winning input pivot, base, and edit
+allocation does it scan for the first residue attaining that known score.
+This removes argmin comparisons, index updates, and index reductions from all
+losing candidates without changing tie selection or sparse-residue handling.
+
+See [the before/after report](PIVOT-OPTIMIZATION.md) for measurements against
+the **committed pivot implementation**, rather than against simple repeating.
+The requested further 5x speedup has not been achieved by these changes.
+
+### Strictly single-threaded second round
+
+For D<=32, a further specialized join keeps minimum costs and candidate IDs
+in SIMD lanes across all pivot-base and substitution-budget candidates. It
+does two horizontal reductions per pivot instead of reducing every candidate.
+Candidate IDs encode input-pivot, base, and substitution-count priority, so
+ties still return exactly the previous witnesses. If residue zero is not
+reachable, it falls back to the unchanged general smallest-residue search.
+
+The shared DP kernel and D>32 join path remain unchanged. No threads,
+OpenMP, or threading API are added. The requested further 2.5x speedup was
+not achieved: improvements are confined to the small-D join workload. See
+[the second-round report](PIVOT-SINGLE-THREAD.md) for the exact comparison
+against the restored version, rejected experiments, and reproduction commands.
+
 ## C API
 
 For all k pivots in one family (input symbols 0..3):

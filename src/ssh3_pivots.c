@@ -17,7 +17,7 @@
 typedef struct {
     uint16_t *minimum,*maximum;
     uint8_t *parent;
-    size_t stride,states,layer,parent_layer,d,edits;
+    size_t stride,states,layer,d,edits;
 } PivotDP;
 
 typedef struct {
@@ -135,20 +135,30 @@ static size_t dp_state(const PivotDP *dp,size_t l,size_t h,size_t e) {
 }
 
 static size_t dp_parent(const PivotDP *dp,size_t l,size_t h,size_t e) {
-    return l*dp->parent_layer+(h*(dp->edits+1)+e)*dp->d;
+    return (l*dp->states+h*(dp->edits+1)+e)*dp->d;
 }
 
 static void circular_padding(uint16_t *p,size_t d) {
     size_t done=0;
-    while (done<32) {
-        size_t count=d<32-done?d:32-done;
+#if PIVOT_SIMD
+    /* A 32-lane load starting at D-1 needs only 31 wrapped elements.
+       At D=31 the final stored lane is unused, so one vector copy also
+       replaces the old two memcpy calls in that important small-D case. */
+    if (d>=31) {
+        _mm512_storeu_si512((void *)(p+d),
+            _mm512_loadu_si512((const void *)p));
+        return;
+    }
+#endif
+    while (done<31) {
+        size_t count=d<31-done?d:31-done;
         memcpy(p+d+done,p,count*sizeof(*p));
         done+=count;
     }
 }
 
 static int dp_allocate(PivotDP *dp,size_t n,size_t edits,size_t d) {
-    size_t cells,parents,bytes;
+    size_t cells,bytes;
     memset(dp,0,sizeof(*dp));
     if (d>SIZE_MAX-63 || edits==SIZE_MAX || edits+1>SIZE_MAX/2) return -1;
     dp->d=d; dp->edits=edits;
@@ -156,16 +166,17 @@ static int dp_allocate(PivotDP *dp,size_t n,size_t edits,size_t d) {
     dp->states=2*(edits+1);
     if (dp->states>SIZE_MAX/d || dp->states>SIZE_MAX/dp->stride) return -1;
     dp->layer=dp->states*dp->stride;
-    dp->parent_layer=dp->states*d;
-    if (n>SIZE_MAX/dp->layer || n>SIZE_MAX/dp->parent_layer) return -1;
-    cells=n*dp->layer; parents=n*dp->parent_layer;
+    if (n>SIZE_MAX/dp->layer) return -1;
+    cells=n*dp->layer;
     if (cells>SIZE_MAX/(2*sizeof(uint16_t))) return -1;
     bytes=2*cells*sizeof(uint16_t);
-    if (parents>SIZE_MAX-bytes) return -1;
-    dp->minimum=pivot_allocate(bytes+parents);
+    /* Small residue spaces favor direct traceback; for large spaces avoid
+       recording millions of parents to recover just a few hundred bases. */
+    if (d<=64 && cells>SIZE_MAX-bytes) return -1;
+    dp->minimum=pivot_allocate(bytes+(d<=64?cells:0));
     if (!dp->minimum) return -1;
     dp->maximum=dp->minimum+cells;
-    dp->parent=(uint8_t *)(dp->maximum+cells);
+    dp->parent=d<=64?(uint8_t *)(dp->maximum+cells):NULL;
     return 0;
 }
 
@@ -186,27 +197,33 @@ static void empty_state(PivotDP *dp,size_t l,size_t h) {
     dp->minimum[state]=dp->maximum[state]=0;
     circular_padding(dp->minimum+state,dp->d);
     circular_padding(dp->maximum+state,dp->d);
-    memset(dp->parent+dp_parent(dp,l,h,0),0,dp->d);
+    if (dp->parent) memset(dp->parent+dp_parent(dp,l,h,0),0,dp->d);
 }
 
-static void dp_build(PivotDP *dp,const uint8_t *s,size_t n,size_t maximum,
-    const SubseqHash3PivotTables *tables,int reverse) {
+static void dp_build(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum,
+    const SubseqHash3PivotTables *tables,int reverse,int record) {
+    /* Keep immutable layout metadata out of the score arrays' alias set.
+       Explicit alignment also avoids GCC's aligned struct-copy store into
+       an insufficiently aligned ASan fake-stack slot. */
+    PivotDP layout __attribute__((aligned(64)))=*workspace;
+    PivotDP *dp=&layout;
     const SubseqHash3Tables *t=reverse?&tables->right:&tables->left;
     const int8_t *signed_A=reverse?tables->right_reversed_A:t->signed_A;
     const uint32_t *masks=reverse?tables->right_reversed_B1_masks:t->B1_masks;
     const size_t d=dp->d;
-    size_t l,h,e,r,a;
+    size_t l,h,e,r,a,j;
     empty_state(dp,0,0);
-    for (l=1;l<=maximum;++l) for (h=0;h<=1 && h<=l;++h) {
-        const size_t retained=l-h,max_e=retained<dp->edits?retained:dp->edits;
+    empty_state(dp,1,1);
+    /* Visit both deletion planes at the same retained length. They use the
+       same table row; h=1's deletion predecessor is the just-built h=0
+       state. The other predecessors have retained length j-1. */
+    for (j=1;j<maximum;++j) for (h=0;h<=1;++h) {
+        const size_t retained=j,max_e=retained<dp->edits?retained:dp->edits;
         const size_t min_e=dp->edits>n-1-retained?
             dp->edits-(n-1-retained):0;
+        l=j+h;
         const unsigned original=s[reverse?n-l:l-1];
         size_t shifts[4];
-        /* The largest prefix is queried only with its one deletion; the
-           deletion-free predecessor is one input position shorter. */
-        if (!h && l==maximum) continue;
-        if (!retained) { empty_state(dp,l,h); continue; }
         for (a=0;a<4;++a) {
             shifts[a]=t->C[4*(retained-1)+a];
             if (reverse && shifts[a]) shifts[a]=d-shifts[a];
@@ -218,24 +235,20 @@ static void dp_build(PivotDP *dp,const uint8_t *s,size_t n,size_t maximum,
                 (__mmask32)((UINT32_C(1)<<lanes)-1);
             const __m512i infinity=_mm512_set1_epi16(-1);
             const __m512i bias=_mm512_set1_epi16(127);
-            const __m256i high_mask=_mm256_set1_epi8((char)0xf0);
-            __m512i plus[4],minus[4];
-            __mmask32 positive[4];
-            __m256i code[4];
-            size_t source_residue[4];
-            for (a=0;a<4;++a) {
-                const size_t row=(4*(retained-1)+a);
-                const unsigned base=(unsigned)a*2u;
-                const __m512i add=_mm512_cvtepi8_epi16(
-                    _mm256_maskz_loadu_epi8(active,signed_A+row*d+r));
-                source_residue[a]=subtract_residue(r,shifts[a],d);
-                plus[a]=_mm512_add_epi16(bias,add);
-                minus[a]=_mm512_sub_epi16(bias,add);
-                positive[a]=(__mmask32)masks[row*t->blocks+r/32];
-                code[a]=_mm256_mask_blend_epi8(positive[a],
-                    _mm256_set1_epi8((char)((base+2u)|((base+1u)<<4))),
-                    _mm256_set1_epi8((char)((base+1u)|((base+2u)<<4))));
-            }
+            const unsigned sym0=original==0?1:0;
+            const unsigned sym1=original<=1?2:1;
+            const unsigned sym2=original<=2?3:2;
+#define PREPARE(ID,SYM) \
+            const size_t row##ID=4*(retained-1)+(SYM); \
+            const __m512i add##ID=_mm512_cvtepi8_epi16( \
+                _mm256_maskz_loadu_epi8(active,signed_A+row##ID*d+r)); \
+            const __m512i plus##ID=_mm512_add_epi16(bias,add##ID); \
+            const __m512i minus##ID=_mm512_sub_epi16(bias,add##ID); \
+            const __mmask32 positive##ID=(__mmask32)masks[row##ID*t->blocks+r/32]; \
+            const size_t q##ID=subtract_residue(r,shifts[SYM],d)
+            PREPARE(0,sym0); PREPARE(1,sym1); PREPARE(2,sym2);
+            PREPARE(3,original);
+#undef PREPARE
             for (e=min_e;e<=max_e;++e) {
                 const size_t dst=dp_state(dp,l,h,e);
                 const size_t deletion=h?dp_state(dp,l-1,h-1,e):0;
@@ -243,47 +256,47 @@ static void dp_build(PivotDP *dp,const uint8_t *s,size_t n,size_t maximum,
                     (const void *)(dp->minimum+deletion+r)):infinity;
                 __m512i mx=h?_mm512_load_si512(
                     (const void *)(dp->maximum+deletion+r)):infinity;
-                __m256i low=_mm256_setzero_si256();
-                __m256i high=_mm256_setzero_si256();
-#define PIVOT_UPDATE(SYMBOL,SOURCE) do { \
-    const unsigned sym_=(SYMBOL); \
-    const size_t src_=(SOURCE)+source_residue[sym_]; \
-    const __m512i smn_=_mm512_loadu_si512( \
-        (const void *)(dp->minimum+src_)); \
-    const __m512i smx_=_mm512_loadu_si512( \
-        (const void *)(dp->maximum+src_)); \
+                __m256i low=_mm256_setzero_si256(),high=low;
+#define PIVOT_UPDATE(ID,SOURCE) do { \
+    const size_t src_=(SOURCE)+q##ID; \
+    const __m512i smn_=_mm512_loadu_si512((const void *)(dp->minimum+src_)); \
+    const __m512i smx_=_mm512_loadu_si512((const void *)(dp->maximum+src_)); \
     const __m512i lo_=_mm512_adds_epu16( \
-        _mm512_mask_blend_epi16(positive[sym_],smx_,smn_),plus[sym_]); \
+        _mm512_mask_blend_epi16(positive##ID,smx_,smn_),plus##ID); \
     const __m512i hi_=_mm512_adds_epu16( \
-        _mm512_mask_blend_epi16(positive[sym_],smn_,smx_),minus[sym_]); \
-    const __mmask32 lm_=_mm512_cmplt_epu16_mask(lo_,mn); \
-    const __mmask32 hm_=_mm512_cmplt_epu16_mask(hi_,mx); \
-    low=_mm256_mask_mov_epi8(low,lm_,code[sym_]); \
-    high=_mm256_mask_mov_epi8(high,hm_,code[sym_]); \
+        _mm512_mask_blend_epi16(positive##ID,smn_,smx_),minus##ID); \
+    if (record) { \
+        const unsigned sym_=(ID)==0?sym0:(ID)==1?sym1:(ID)==2?sym2:original; \
+        const unsigned base_=2*sym_; \
+        const __m256i code_=_mm256_mask_blend_epi8(positive##ID, \
+            _mm256_set1_epi8((char)((base_+2)|((base_+1)<<4))), \
+            _mm256_set1_epi8((char)((base_+1)|((base_+2)<<4)))); \
+        low=_mm256_mask_mov_epi8(low,_mm512_cmplt_epu16_mask(lo_,mn),code_); \
+        high=_mm256_mask_mov_epi8(high,_mm512_cmplt_epu16_mask(hi_,mx),code_); \
+    } \
     mn=_mm512_min_epu16(mn,lo_); mx=_mm512_min_epu16(mx,hi_); \
 } while (0)
                 if (e) {
                     const size_t changed=dp_state(dp,l-1,h,e-1);
-                    if (original!=0) PIVOT_UPDATE(0,changed);
-                    if (original!=1) PIVOT_UPDATE(1,changed);
-                    if (original!=2) PIVOT_UPDATE(2,changed);
-                    if (original!=3) PIVOT_UPDATE(3,changed);
+                    PIVOT_UPDATE(0,changed); PIVOT_UPDATE(1,changed);
+                    PIVOT_UPDATE(2,changed);
                 }
                 if (e<retained) {
                     const size_t kept=dp_state(dp,l-1,h,e);
-                    PIVOT_UPDATE(original,kept);
+                    PIVOT_UPDATE(3,kept);
                 }
 #undef PIVOT_UPDATE
                 _mm512_store_si512((void *)(dp->minimum+dst+r),mn);
                 _mm512_store_si512((void *)(dp->maximum+dst+r),mx);
-                _mm256_mask_storeu_epi8(dp->parent+dp_parent(dp,l,h,e)+r,
-                    active,_mm256_ternarylogic_epi32(low,high,high_mask,0xd8));
+                if (record) _mm256_mask_storeu_epi8(
+                    dp->parent+dp_parent(dp,l,h,e)+r,active,
+                    _mm256_ternarylogic_epi32(low,high,
+                        _mm256_set1_epi8((char)0xf0),0xd8));
             }
         }
 #else
         for (e=min_e;e<=max_e;++e) {
             const size_t dst=dp_state(dp,l,h,e);
-            uint8_t *parent=dp->parent+dp_parent(dp,l,h,e);
             for (r=0;r<d;++r) {
                 unsigned mn=UNREACHABLE,mx=UNREACHABLE,low=0,high=0;
                 unsigned candidate;
@@ -318,7 +331,8 @@ static void dp_build(PivotDP *dp,const uint8_t *s,size_t n,size_t maximum,
                 }
                 dp->minimum[dst+r]=(uint16_t)mn;
                 dp->maximum[dst+r]=(uint16_t)mx;
-                parent[r]=(uint8_t)(low|(high<<4));
+                if (record) dp->parent[dp_parent(dp,l,h,e)+r]=
+                    (uint8_t)(low|(high<<4));
             }
         }
 #endif
@@ -332,65 +346,62 @@ static void dp_build(PivotDP *dp,const uint8_t *s,size_t n,size_t maximum,
 
 /* For a fixed output residue, the reflected right-side layout turns the
    residue constraint into a circular shift and pairwise SIMD addition. */
-static unsigned join_residue(const uint16_t *left,const uint16_t *right,
-    size_t d,size_t shift,size_t *left_residue) {
-    unsigned best=UNREACHABLE;
-    size_t arg=0,r;
+static unsigned join_cost(const uint16_t *left,const uint16_t *right,
+    size_t d,size_t shift) {
+    size_t r;
 #if PIVOT_SIMD
-    if (d<=UINT16_MAX) {
-        __m512i minima=_mm512_set1_epi16(-1);
-        __m512i indices=_mm512_setzero_si512();
-        /* Explicit alignment is also required for GCC's ASan fake stack:
-           it may turn a full-vector store to this local into vmovdqa64. */
-        uint16_t positions[32] __attribute__((aligned(64)));
-        const __m512i lanes=_mm512_set_epi16(31,30,29,28,27,26,25,24,
-            23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,
-            7,6,5,4,3,2,1,0);
-        for (r=0;r<d;r+=32) {
-            const size_t count=d-r<32?d-r:32;
-            const __mmask32 active=count==32?(__mmask32)UINT32_MAX:
-                (__mmask32)((UINT32_C(1)<<count)-1);
-            const size_t q=r>=d-shift?r-(d-shift):r+shift;
-            const __m512i a=_mm512_load_si512((const void *)(left+r));
-            const __m512i b=_mm512_loadu_si512((const void *)(right+q));
-            const __m512i sum=_mm512_adds_epu16(a,b);
-            const __mmask32 better=active&_mm512_cmplt_epu16_mask(sum,minima);
-            minima=_mm512_mask_mov_epi16(minima,better,sum);
-            indices=_mm512_mask_mov_epi16(indices,better,
-                _mm512_add_epi16(lanes,_mm512_set1_epi16((short)r)));
-        }
-        {
-            const __m512i pairs=_mm512_min_epu16(minima,
-                _mm512_srli_epi32(minima,16));
-            uint32_t hits;
-            best=_mm512_reduce_min_epu32(_mm512_and_si512(
-                pairs,_mm512_set1_epi32(65535)));
-            if (best==UNREACHABLE) { *left_residue=0; return best; }
-            hits=(uint32_t)_mm512_cmpeq_epi16_mask(minima,
-                _mm512_set1_epi16((short)best));
-            if (d<=32) {
-                arg=(size_t)__builtin_ctz(hits);
-            } else {
-                _mm512_store_si512((void *)positions,indices);
-                arg=d;
-                while (hits) {
-                    const unsigned lane=(unsigned)__builtin_ctz(hits);
-                    if (positions[lane]<arg) arg=positions[lane];
-                    hits&=hits-1;
-                }
-            }
-        }
-        *left_residue=arg;
-        return best;
+    __m512i minimum=_mm512_set1_epi16(-1);
+    for (r=0;r<d;r+=32) {
+        const size_t count=d-r<32?d-r:32;
+        const __mmask32 active=count==32?(__mmask32)UINT32_MAX:
+            (__mmask32)((UINT32_C(1)<<count)-1);
+        const size_t q=r>=d-shift?r-(d-shift):r+shift;
+        const __m512i sum=_mm512_adds_epu16(
+            _mm512_load_si512((const void *)(left+r)),
+            _mm512_loadu_si512((const void *)(right+q)));
+        minimum=_mm512_mask_min_epu16(minimum,active,minimum,sum);
     }
-#endif
+    {
+        const __m512i pairs=_mm512_min_epu16(minimum,
+            _mm512_srli_epi32(minimum,16));
+        return _mm512_reduce_min_epu32(_mm512_and_si512(
+            pairs,_mm512_set1_epi32(65535)));
+    }
+#else
+    unsigned best=UNREACHABLE;
     for (r=0;r<d;++r) {
         const size_t q=r>=d-shift?r-(d-shift):r+shift;
-        unsigned value=(unsigned)left[r]+right[q];
-        if (value<best) { best=value; arg=r; }
+        const unsigned value=(unsigned)left[r]+right[q];
+        if (value<best) best=value;
     }
-    *left_residue=arg;
     return best;
+#endif
+}
+
+/* Resolve the first residue only after the winning score is known. */
+static size_t join_witness(const uint16_t *left,const uint16_t *right,
+    size_t d,size_t shift,unsigned best) {
+    size_t r;
+#if PIVOT_SIMD
+    const __m512i target=_mm512_set1_epi16((short)best);
+    for (r=0;r<d;r+=32) {
+        const size_t count=d-r<32?d-r:32;
+        const __mmask32 active=count==32?(__mmask32)UINT32_MAX:
+            (__mmask32)((UINT32_C(1)<<count)-1);
+        const size_t q=r>=d-shift?r-(d-shift):r+shift;
+        const __m512i sum=_mm512_adds_epu16(
+            _mm512_load_si512((const void *)(left+r)),
+            _mm512_loadu_si512((const void *)(right+q)));
+        const uint32_t hits=(uint32_t)(_mm512_cmpeq_epi16_mask(sum,target)&active);
+        if (hits) return r+(size_t)__builtin_ctz(hits);
+    }
+#else
+    for (r=0;r<d;++r) {
+        const size_t q=r>=d-shift?r-(d-shift):r+shift;
+        if ((unsigned)left[r]+right[q]==best) return r;
+    }
+#endif
+    return 0; /* The caller has already established a reachable optimum. */
 }
 
 /* Find min (left_psi + pivot_psi - reflected_right_psi) mod D in O(D),
@@ -416,12 +427,92 @@ static size_t first_residue(const uint16_t *left,const uint16_t *right,
     return best;
 }
 
+#if PIVOT_SIMD
+static unsigned minimum_word(__m512i values) {
+    const __m512i pairs=_mm512_min_epu16(values,_mm512_srli_epi32(values,16));
+    return _mm512_reduce_min_epu32(_mm512_and_si512(
+        pairs,_mm512_set1_epi32(65535)));
+}
+
+/* When the whole residue space fits in one register, keep the winning
+   candidate in lanes across ALL edit splits, and reduce just once. */
+static int choose_pivot_small(const uint8_t *s,size_t n,size_t edits,size_t pivot,
+    const SubseqHash3PivotTables *t,const PivotDP *left,const PivotDP *right,
+    PivotChoice *choice) {
+    const size_t k=n-1,d=t->d,width=edits+1;
+    const __mmask32 active=d==32?(__mmask32)UINT32_MAX:
+        (__mmask32)((UINT32_C(1)<<d)-1);
+    __m512i minimum=_mm512_set1_epi16(-1),indices=minimum;
+    size_t input,e,table,ls,rs,shift,arg,id;
+    unsigned symbol,best;
+    const uint16_t *lc,*rc;
+    for (input=pivot;input<=pivot+1;++input) {
+        const size_t left_del=input-pivot,right_del=1-left_del;
+        const size_t right_length=k-pivot-1;
+        for (symbol=0;symbol<4;++symbol) {
+            const size_t changed=symbol!=s[input];
+            size_t min_e,max_e;
+            __m512i bias;
+            if (changed>edits) continue;
+            table=4*pivot+symbol;
+            bias=_mm512_set1_epi16((short)(127-t->pivot_A[table]));
+            min_e=edits-changed>right_length?edits-changed-right_length:0;
+            max_e=edits-changed<pivot?edits-changed:pivot;
+            for (e=min_e;e<=max_e;++e) {
+                const size_t right_e=edits-changed-e;
+                __m512i cost;
+                __mmask32 better;
+                ls=dp_state(left,input,left_del,e);
+                rs=dp_state(right,n-input-1,right_del,right_e);
+                lc=(t->pivot_left_sign[table]>0?left->maximum:left->minimum)+ls;
+                rc=(t->pivot_right_sign[table]>0?right->maximum:right->minimum)+rs;
+                cost=_mm512_adds_epu16(_mm512_load_si512((const void *)lc),
+                    _mm512_loadu_si512((const void *)(rc+t->pivot_C[table])));
+                cost=_mm512_adds_epu16(cost,bias);
+                better=active&_mm512_cmplt_epu16_mask(cost,minimum);
+                minimum=_mm512_mask_mov_epi16(minimum,better,cost);
+                id=((input-pivot)*4+symbol)*width+e;
+                indices=_mm512_mask_mov_epi16(indices,better,
+                    _mm512_set1_epi16((short)id));
+            }
+        }
+    }
+    best=minimum_word(minimum);
+    if (best==UNREACHABLE) return -1; /* Use the general sparse-psi search. */
+    /* Nonmatching lanes must sort after every finite candidate index. */
+    indices=_mm512_mask_mov_epi16(_mm512_set1_epi16(-1),
+        _mm512_cmpeq_epi16_mask(minimum,_mm512_set1_epi16((short)best)),indices);
+    id=minimum_word(indices);
+    choice->input_pivot=pivot+id/(4*width);
+    choice->symbol=(unsigned)((id/width)%4);
+    choice->left_substitutions=id%width;
+    choice->psi=0; choice->cost=best;
+    table=4*pivot+choice->symbol;
+    ls=dp_state(left,choice->input_pivot,choice->input_pivot-pivot,
+        choice->left_substitutions);
+    rs=dp_state(right,n-choice->input_pivot-1,
+        1-(choice->input_pivot-pivot),
+        edits-(choice->symbol!=s[choice->input_pivot])-choice->left_substitutions);
+    lc=(t->pivot_left_sign[table]>0?left->maximum:left->minimum)+ls;
+    rc=(t->pivot_right_sign[table]>0?right->maximum:right->minimum)+rs;
+    shift=t->pivot_C[table];
+    arg=join_witness(lc,rc,d,shift,best-(unsigned)(127-t->pivot_A[table]));
+    choice->left_residue=arg;
+    choice->right_residue=arg>=d-shift?arg-(d-shift):arg+shift;
+    return 0;
+}
+#endif
+
 static int choose_pivot(const uint8_t *s,size_t n,size_t edits,size_t pivot,
     const SubseqHash3PivotTables *t,const PivotDP *left,const PivotDP *right,
     size_t *scratch,PivotChoice *choice) {
     const size_t k=n-1,d=t->d;
     size_t input,e;
     unsigned symbol;
+#if PIVOT_SIMD
+    if (d<=32 && !choose_pivot_small(s,n,edits,pivot,t,left,right,choice))
+        return 0;
+#endif
     memset(choice,0,sizeof(*choice)); choice->psi=d; choice->cost=UNREACHABLE;
     for (input=pivot;input<=pivot+1;++input) {
         const size_t left_del=input-pivot,right_del=1-left_del;
@@ -441,14 +532,14 @@ static int choose_pivot(const uint8_t *s,size_t n,size_t edits,size_t pivot,
                     left->maximum:left->minimum)+ls;
                 const uint16_t *rc=(t->pivot_right_sign[table]>0?
                     right->maximum:right->minimum)+rs;
-                size_t psi=0,arg=0,shift=t->pivot_C[table];
-                unsigned cost=join_residue(lc,rc,d,shift,&arg);
+                size_t psi=0,shift=t->pivot_C[table];
+                unsigned cost=join_cost(lc,rc,d,shift);
                 if (cost==UNREACHABLE) {
                     if (!choice->psi) continue;
                     psi=first_residue(lc,rc,d,t->pivot_C[table],scratch);
                     if (psi==d || psi>choice->psi) continue;
                     shift=subtract_residue(t->pivot_C[table],psi,d);
-                    cost=join_residue(lc,rc,d,shift,&arg);
+                    cost=join_cost(lc,rc,d,shift);
                     if (cost==UNREACHABLE) continue;
                 }
                 cost+=(unsigned)(127-t->pivot_A[table]);
@@ -456,13 +547,32 @@ static int choose_pivot(const uint8_t *s,size_t n,size_t edits,size_t pivot,
                     choice->psi=psi; choice->cost=cost;
                     choice->input_pivot=input; choice->symbol=symbol;
                     choice->left_substitutions=e;
-                    choice->left_residue=arg;
-                    choice->right_residue=arg>=d-shift?arg-(d-shift):arg+shift;
                 }
             }
         }
     }
-    return choice->psi==d?-1:0;
+    if (choice->psi==d) return -1;
+    /* Argmin bookkeeping is needed once for the winning join, not for
+       every pivot/base/substitution split considered above. */
+    {
+        const size_t table=4*pivot+choice->symbol;
+        const size_t left_del=choice->input_pivot-pivot;
+        const size_t changed=choice->symbol!=s[choice->input_pivot];
+        const size_t right_e=edits-changed-choice->left_substitutions;
+        const size_t ls=dp_state(left,choice->input_pivot,left_del,
+            choice->left_substitutions);
+        const size_t rs=dp_state(right,n-choice->input_pivot-1,1-left_del,right_e);
+        const uint16_t *lc=(t->pivot_left_sign[table]>0?
+            left->maximum:left->minimum)+ls;
+        const uint16_t *rc=(t->pivot_right_sign[table]>0?
+            right->maximum:right->minimum)+rs;
+        const size_t shift=subtract_residue(t->pivot_C[table],choice->psi,d);
+        const size_t arg=join_witness(lc,rc,d,shift,
+            choice->cost-(unsigned)(127-t->pivot_A[table]));
+        choice->left_residue=arg;
+        choice->right_residue=arg>=d-shift?arg-(d-shift):arg+shift;
+    }
+    return 0;
 }
 
 static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
@@ -470,12 +580,49 @@ static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
     size_t residue,int type,SubseqHash3EditResult *out) {
     size_t retained=l-h;
     while (retained) {
-        const uint8_t packed=dp->parent[dp_parent(dp,l,h,e)+residue];
-        unsigned code=type==1?(packed&15u):(packed>>4);
+        const size_t current=dp_state(dp,l,h,e)+residue;
+        const unsigned best=type==1?dp->minimum[current]:dp->maximum[current];
+        const unsigned original=s[reverse?n-l:l-1];
+        unsigned candidate;
         size_t position,output,shift;
-        unsigned symbol;
-        if (!code) { --l; --h; continue; }
-        --code; symbol=code/2u; type=(int)(code%2u)+1;
+        unsigned symbol=original;
+        /* Recover only the chosen witnesses from already stored scores.
+           Deletion, ascending changed bases, then unchanged reproduce the
+           reference's strict-update tie order without storing any parents. */
+        if (dp->parent) {
+            const unsigned packed=dp->parent[dp_parent(dp,l,h,e)+residue];
+            unsigned code=type==1?(packed&15u):(packed>>4);
+            if (!code) { --l; --h; continue; }
+            --code; symbol=code/2; type=(int)(code%2)+1;
+        } else {
+            if (h) {
+                const size_t previous=dp_state(dp,l-1,h-1,e)+residue;
+                const unsigned value=type==1?dp->minimum[previous]:dp->maximum[previous];
+                if (value==best) { --l; --h; continue; }
+            }
+            for (candidate=0;candidate<4;++candidate) {
+                const unsigned a=candidate<3?
+                    candidate+(candidate>=original):original;
+                const size_t changed=a!=original;
+                size_t q,src,table;
+                int source_type,add;
+                unsigned value;
+                if (changed?(!e):(e>=retained)) continue;
+                shift=t->C[4*(retained-1)+a];
+                if (reverse && shift) shift=dp->d-shift;
+                q=subtract_residue(residue,shift,dp->d);
+                table=(4*(retained-1)+a)*dp->d+
+                    (reverse && residue?dp->d-residue:residue);
+                source_type=t->B1[table]>0?type:3-type;
+                add=127+(type==1?t->signed_A[table]:-t->signed_A[table]);
+                src=dp_state(dp,l-1,h,e-changed)+q;
+                value=source_type==1?dp->minimum[src]:dp->maximum[src];
+                if (value!=UNREACHABLE && value+(unsigned)add==best) {
+                    symbol=a; type=source_type;
+                    break;
+                }
+            }
+        }
         position=reverse?n-l:l-1;
         output=reverse?out->length-retained:retained-1;
         out->seed[output]=(uint8_t)symbol;
@@ -518,8 +665,10 @@ static int compute_pivot_seeds_impl(const uint8_t *s,size_t n,size_t edits,
     if (dp_reserve(left,&workspace->left_layers,max_pivot+2,edits,t->d) ||
         dp_reserve(right,&workspace->right_layers,n-min_pivot,edits,t->d))
         goto done;
-    dp_build(left,s,n,max_pivot+1,t,0);
-    dp_build(right,s,n,n-min_pivot-1,t,1);
+    if (left->parent) dp_build(left,s,n,max_pivot+1,t,0,1);
+    else dp_build(left,s,n,max_pivot+1,t,0,0);
+    if (right->parent) dp_build(right,s,n,n-min_pivot-1,t,1,1);
+    else dp_build(right,s,n,n-min_pivot-1,t,1,0);
     for (index=0;index<count;++index) {
         const size_t pivot=pivots?pivots[index]:index;
         PivotChoice choice;

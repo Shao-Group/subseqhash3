@@ -16,7 +16,8 @@ SOURCES := main.c subseqhash3.c table_file.c ssh3_simulate.c \
 OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(OBJECTS:.o=.d)
 
-.PHONY: all simd test bench-one check-one bench-pivots check-pivots clean clean-simd
+.PHONY: all simd test bench-one check-one bench-pivots check-pivots bench-pivots-speed check-pivots-speed clean clean-simd
+.PHONY: bench-pivots-single check-pivots-single
 
 all: $(PROGRAM)
 
@@ -50,16 +51,59 @@ bench-pivots: $(BUILD_DIR)/bench-pivots
 check-pivots: $(BUILD_DIR)/bench-pivots
 	$(BUILD_DIR)/bench-pivots --check-only
 
+# Immutable pre-optimization pivot reference, compiled with the SAME flags.
+# Requires the repository history containing ca35567; no source checkout edits.
+$(BUILD_DIR)/pivots-baseline.o: src/ssh3_pivots.h src/subseqhash3.h | $(BUILD_DIR)
+	git show ca35567:src/ssh3_pivots.c | $(CC) $(CPPFLAGS) $(CFLAGS) \
+	  -Dsubseqhash3_pivot_tables_init=baseline_pivot_tables_init \
+	  -Dsubseqhash3_pivot_tables_destroy=baseline_pivot_tables_destroy \
+	  -Dsubseqhash3_pivot_workspace_create=baseline_pivot_workspace_create \
+	  -Dsubseqhash3_pivot_workspace_destroy=baseline_pivot_workspace_destroy \
+	  -Dsubseqhash3_compute_pivot_seeds=baseline_compute_pivot_seeds \
+	  -Dsubseqhash3_compute_pivot_repeats=baseline_compute_pivot_repeats \
+	  -Dsubseqhash3_compute_pivot_repeats_with_workspace=baseline_compute_pivot_repeats_with_workspace \
+	  -x c -c - -o $@
+
+$(BUILD_DIR)/bench-pivots-speed: bench/pivots_speed.c $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/pivots-baseline.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+bench-pivots-speed: $(BUILD_DIR)/bench-pivots-speed
+	$(BUILD_DIR)/bench-pivots-speed
+
+check-pivots-speed: $(BUILD_DIR)/bench-pivots-speed
+	$(BUILD_DIR)/bench-pivots-speed --check-only
+
+# Restored single-threaded baseline immediately before the second round.
+$(BUILD_DIR)/pivots-round1.o: bench/reference/pivots_round1.c src/ssh3_pivots.h src/subseqhash3.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) \
+	  -Dsubseqhash3_pivot_tables_init=baseline_pivot_tables_init \
+	  -Dsubseqhash3_pivot_tables_destroy=baseline_pivot_tables_destroy \
+	  -Dsubseqhash3_pivot_workspace_create=baseline_pivot_workspace_create \
+	  -Dsubseqhash3_pivot_workspace_destroy=baseline_pivot_workspace_destroy \
+	  -Dsubseqhash3_compute_pivot_seeds=baseline_compute_pivot_seeds \
+	  -Dsubseqhash3_compute_pivot_repeats=baseline_compute_pivot_repeats \
+	  -Dsubseqhash3_compute_pivot_repeats_with_workspace=baseline_compute_pivot_repeats_with_workspace \
+	  -c $< -o $@
+
+$(BUILD_DIR)/bench-pivots-single: bench/pivots_speed.c $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/pivots-round1.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPIVOT_BASELINE_LABEL='"restored-single-thread-round1"' $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+bench-pivots-single: $(BUILD_DIR)/bench-pivots-single
+	$(BUILD_DIR)/bench-pivots-single
+
+check-pivots-single: $(BUILD_DIR)/bench-pivots-single
+	$(BUILD_DIR)/bench-pivots-single --check-only
+
 simd: clean-simd
 	$(MAKE) BUILD_DIR=$(SIMD_BUILD_DIR) \
 		CFLAGS="$(CFLAGS) $(SIMD_CFLAGS)" all
 
 clean-simd:
-	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots
+	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single
 	rmdir $(SIMD_BUILD_DIR) 2>/dev/null || true
 
 clean: clean-simd
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots
+	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single
 	rmdir $(BUILD_DIR) 2>/dev/null || true
 
 -include $(DEPS)

@@ -54,8 +54,10 @@ in version control so a fresh checkout can build.
 
 The dedicated checks include 365 single-seed equivalence cases and 140
 exhaustive small edit neighborhoods for the pivot algorithm, plus larger
-witnesses, score limits, workspace reuse, and repeat batching. Standalone
-ASan/UBSan commands are recorded in the algorithm documents; they avoid the
+witnesses, score limits, workspace reuse, and repeat batching. The optimization
+benchmark adds 277 exact comparisons against its linked reference, including
+all-tied scores, unreachable residue zero, and maximum-length/cost cases.
+Standalone ASan/UBSan commands are recorded in the algorithm documents; they avoid the
 pre-existing table-file serialization over-read previously found at
 `src/table_file.c:67`. The full ordinary test suite passes, but this does
 not imply the full repository is sanitizer-clean.
@@ -73,6 +75,19 @@ It tests `(n,E)=(30,5)` and `(50,8)` at both D=31 and D=1024, with 32
 inputs, four loops, seven timing samples, and a warmup for every method.
 The machine must permit CPU 0 for the affinity command; substitute an
 allowed CPU otherwise. See [r=10 results and methodology](bench/R10.md).
+
+The follow-up pivot optimization preserves those exact orders and witnesses.
+For its before/after comparison against the original pivot implementation,
+see [optimization results](bench/PIVOT-OPTIMIZATION.md) and the
+`bench-pivots-speed` / `check-pivots-speed` Makefile targets. This comparison
+links the reference source from commit `ca35567` with renamed exports, so it
+requires repository history, not just a source archive.
+
+The subsequent strictly single-threaded round accelerates joins for D<=32.
+Its [before/after report](bench/PIVOT-SINGLE-THREAD.md) compares against the
+restored first optimization, using `bench-pivots-single` and
+`check-pivots-single`. It does not achieve the requested further 2.5x gain;
+D=1024 performance remains essentially unchanged.
 
 The previous API has the opposite substitution/deletion counts to the
 pivot API. Therefore their runtime comparison is not a seed-quality or
