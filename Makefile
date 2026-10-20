@@ -12,12 +12,13 @@ SIMD_CFLAGS ?= -O3 -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512
 
 PROGRAM := $(BUILD_DIR)/subseqhash3
 SOURCES := main.c subseqhash3.c table_file.c ssh3_simulate.c \
-	ssh3_tables.c ssh3_seeds.c ssh3_collisions.c ssh3_test.c ssh3_pivots.c
+	ssh3_tables.c ssh3_seeds.c ssh3_collisions.c ssh3_test.c ssh3_pivots.c \
+	pivot_table_file.c ssh3_repeats.c
 OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(OBJECTS:.o=.d)
 
 .PHONY: all simd test bench-one check-one bench-pivots check-pivots bench-pivots-speed check-pivots-speed clean clean-simd
-.PHONY: bench-pivots-single check-pivots-single
+.PHONY: bench-pivots-single check-pivots-single check-repeats
 
 all: $(PROGRAM)
 
@@ -30,8 +31,15 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 $(PROGRAM): $(OBJECTS)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(PROGRAM)
+test: $(PROGRAM) $(BUILD_DIR)/check-repeats
 	$(PROGRAM) test
+	$(BUILD_DIR)/check-repeats 2>$(BUILD_DIR)/repeats-test.log || { cat $(BUILD_DIR)/repeats-test.log >&2; exit 1; }
+
+$(BUILD_DIR)/check-repeats: tests/repeats.c $(BUILD_DIR)/subseqhash3.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/pivot_table_file.o $(BUILD_DIR)/table_file.o $(BUILD_DIR)/ssh3_tables.o $(BUILD_DIR)/ssh3_repeats.o $(BUILD_DIR)/ssh3_seeds.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+check-repeats: $(BUILD_DIR)/check-repeats
+	$(BUILD_DIR)/check-repeats 2>$(BUILD_DIR)/repeats-test.log || { cat $(BUILD_DIR)/repeats-test.log >&2; exit 1; }
 
 $(BUILD_DIR)/bench-one: bench/one_substitution.c $(BUILD_DIR)/subseqhash3.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -99,11 +107,11 @@ simd: clean-simd
 		CFLAGS="$(CFLAGS) $(SIMD_CFLAGS)" all
 
 clean-simd:
-	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single
+	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single $(SIMD_BUILD_DIR)/check-repeats $(SIMD_BUILD_DIR)/repeats-test.log
 	rmdir $(SIMD_BUILD_DIR) 2>/dev/null || true
 
 clean: clean-simd
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single
+	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single $(BUILD_DIR)/check-repeats $(BUILD_DIR)/repeats-test.log
 	rmdir $(BUILD_DIR) 2>/dev/null || true
 
 -include $(DEPS)

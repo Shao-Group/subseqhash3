@@ -1,9 +1,9 @@
 # SubseqHash3
 
 SubseqHash3 generates and evaluates DNA seeds with exact edit budgets.
-The existing CLI supports `simulate`, `tables`, `seeds`, `collisions`, and
-`test`; run `build/subseqhash3 --help` for usage. The specialized single-seed
-and pivot APIs described below are C APIs, not additional CLI subcommands.
+The CLI supports `simulate`, `tables`, `seeds`, `repeats`, `collisions`, and
+`test`; run `build/subseqhash3 --help` for usage. `repeats` exposes the pivot
+approach; the specialized one-substitution function remains a C API.
 
 ## Build and check
 
@@ -22,6 +22,30 @@ make BUILD_DIR=build/pivots-fast \
 
 The default build uses the scalar fallback. The AVX-512 build requires a
 compatible CPU and does not perform runtime CPU dispatch.
+
+## Pivot seeds from the command line
+
+Generate reusable pivot tables, then seed every length-30 window with exactly
+one deletion and five substitutions, producing ten repetitions per window:
+
+```sh
+make simd
+build/simd/subseqhash3 tables 30 1024 10 tables.piv --pivots --seed 42
+build/simd/subseqhash3 repeats input.seq 30 5 1024 10 seeds.csv tables.piv
+```
+
+`input.seq` contains one DNA sequence per line. Alternatively, omit the last
+argument to generate tables automatically in `seeds.csv.piv`:
+
+```sh
+build/simd/subseqhash3 repeats input.seq 30 5 1024 10 seeds.csv
+```
+
+The default `tables` command still produces legacy files for `seeds` and
+`collisions`. These lack pivot parameters and cannot be used with `repeats`;
+use `--pivots` for the new format. In pivot mode, R means seed repetitions,
+requiring `ceil(R/(W-1))` independent families rather than R full table sets.
+All seeding remains single-threaded. See [CLI and table-format details](bench/REPEATS.md).
 
 ## Added APIs
 
@@ -57,10 +81,11 @@ exhaustive small edit neighborhoods for the pivot algorithm, plus larger
 witnesses, score limits, workspace reuse, and repeat batching. The optimization
 benchmark adds 277 exact comparisons against its linked reference, including
 all-tied scores, unreachable residue zero, and maximum-length/cost cases.
-Standalone ASan/UBSan commands are recorded in the algorithm documents; they avoid the
-pre-existing table-file serialization over-read previously found at
-`src/table_file.c:67`. The full ordinary test suite passes, but this does
-not imply the full repository is sanitizer-clean.
+Standalone ASan/UBSan commands are recorded in the algorithm documents.
+The `repeats` addition also fixes the previously recorded legacy table-file
+mask-copy over-read caused by misplaced integer division. Historical optimization reports
+describe the earlier state. `make test` now includes pivot table-file and CLI
+tests; `make check-repeats` runs these independently.
 
 The requested r=10 comparison is reproducible with:
 

@@ -59,7 +59,7 @@ static int layout(size_t n,size_t d,size_t count,TableHeader *header) {
 static void copy_set(uint8_t *base,const TableHeader *h,
                      const SubseqHash3Tables *table) {
     size_t cells=(size_t)h->n*(size_t)h->d*4;
-    size_t masks=(size_t)h->n*4*((size_t)h->d+31)/32;
+    size_t masks=(size_t)h->n*4*(((size_t)h->d+31)/32);
     memcpy(base+h->a_offset,table->A,cells);
     memcpy(base+h->b1_offset,table->B1,cells);
     memcpy(base+h->b2_offset,table->B2,cells);
