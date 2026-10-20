@@ -13,7 +13,7 @@ SIMD_CFLAGS ?= -O3 -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512
 PROGRAM := $(BUILD_DIR)/subseqhash3
 SOURCES := main.c subseqhash3.c table_file.c ssh3_simulate.c \
 	ssh3_tables.c ssh3_seeds.c ssh3_collisions.c ssh3_test.c ssh3_pivots.c \
-	pivot_table_file.c ssh3_repeats.c
+	pivot_table_file.c ssh3_repeats.c ssh3_deletions.c ssh3_deletions_cli.c
 OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(OBJECTS:.o=.d)
 
@@ -31,8 +31,9 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 $(PROGRAM): $(OBJECTS)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(PROGRAM) $(BUILD_DIR)/check-repeats
+test: $(PROGRAM) $(BUILD_DIR)/check-repeats $(BUILD_DIR)/check-deletions
 	$(PROGRAM) test
+	$(BUILD_DIR)/check-deletions 2>$(BUILD_DIR)/deletions-test.log || { cat $(BUILD_DIR)/deletions-test.log >&2; exit 1; }
 	$(BUILD_DIR)/check-repeats 2>$(BUILD_DIR)/repeats-test.log || { cat $(BUILD_DIR)/repeats-test.log >&2; exit 1; }
 
 $(BUILD_DIR)/check-repeats: tests/repeats.c $(BUILD_DIR)/subseqhash3.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/pivot_table_file.o $(BUILD_DIR)/table_file.o $(BUILD_DIR)/ssh3_tables.o $(BUILD_DIR)/ssh3_repeats.o $(BUILD_DIR)/ssh3_seeds.o
@@ -107,11 +108,32 @@ simd: clean-simd
 		CFLAGS="$(CFLAGS) $(SIMD_CFLAGS)" all
 
 clean-simd:
-	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single $(SIMD_BUILD_DIR)/check-repeats $(SIMD_BUILD_DIR)/repeats-test.log
+	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single $(SIMD_BUILD_DIR)/check-repeats $(SIMD_BUILD_DIR)/repeats-test.log $(SIMD_BUILD_DIR)/check-deletions $(SIMD_BUILD_DIR)/bench-deletions $(SIMD_BUILD_DIR)/deletions-test.log
 	rmdir $(SIMD_BUILD_DIR) 2>/dev/null || true
 
 clean: clean-simd
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single $(BUILD_DIR)/check-repeats $(BUILD_DIR)/repeats-test.log
+	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single $(BUILD_DIR)/check-repeats $(BUILD_DIR)/repeats-test.log $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-deletions $(BUILD_DIR)/deletions-test.log
 	rmdir $(BUILD_DIR) 2>/dev/null || true
 
 -include $(DEPS)
+
+.PHONY: check-deletions
+$(BUILD_DIR)/check-deletions: tests/deletions.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_deletions_cli.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+check-deletions: $(BUILD_DIR)/check-deletions
+	$(BUILD_DIR)/check-deletions 2>$(BUILD_DIR)/deletions-test.log || { cat $(BUILD_DIR)/deletions-test.log >&2; exit 1; }
+
+# Optional comparison against the user's unmodified SubseqHash2 checkout.
+SUBSEQHASH2_DIR ?= subseqhash2
+CXX ?= c++
+DELETION_CXXFLAGS ?= $(filter-out -std=c99,$(CFLAGS)) -std=c++11
+$(BUILD_DIR)/bench-deletions: bench/deletions.cpp $(BUILD_DIR)/ssh3_deletions.o $(SUBSEQHASH2_DIR)/src/subseqhash2seeding.cpp $(SUBSEQHASH2_DIR)/src/seeding.cpp
+	$(CXX) $(CPPFLAGS) -I$(SUBSEQHASH2_DIR)/src $(DELETION_CXXFLAGS) -include cstdint -include cstdio -include string $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+.PHONY: bench-deletions check-deletions-reference
+bench-deletions: $(BUILD_DIR)/bench-deletions
+	$(BUILD_DIR)/bench-deletions
+
+check-deletions-reference: $(BUILD_DIR)/bench-deletions
+	$(BUILD_DIR)/bench-deletions --check-only

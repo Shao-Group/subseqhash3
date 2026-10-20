@@ -1,7 +1,7 @@
 # SubseqHash3
 
 SubseqHash3 generates and evaluates DNA seeds with exact edit budgets.
-The CLI supports `simulate`, `tables`, `seeds`, `repeats`, `collisions`, and
+The CLI supports `simulate`, `tables`, `seeds`, `repeats`, `deletions`, `collisions`, and
 `test`; run `build/subseqhash3 --help` for usage. `repeats` exposes the pivot
 approach; the specialized one-substitution function remains a C API.
 
@@ -47,6 +47,21 @@ use `--pivots` for the new format. In pivot mode, R means seed repetitions,
 requiring `ceil(R/(W-1))` independent families rather than R full table sets.
 All seeding remains single-threaded. See [CLI and table-format details](bench/REPEATS.md).
 
+## Deletion-only SubseqHash2 seeds
+
+Generate ten of the k=25 original SubseqHash2 pivot orders for every length-30
+window, deleting exactly five bases and making no substitutions:
+
+```sh
+build/subseqhash3 deletions input.seq 30 5 11 10 seeds.csv --seed 42
+```
+
+Use `make simd` and `build/simd/subseqhash3` for acceleration. An optional
+original SubseqHash2 text table can replace `--seed 42`. This separate path
+preserves the original side directions and exact 64-bit scores. It supports
+up to k=W-E seeds per call, and leaves the mixed-edit algorithms intact.
+See [algorithm, API, correctness, and measured speedups](bench/DELETIONS.md).
+
 ## Added APIs
 
 | API | Exact substitutions | Exact deletions | Output |
@@ -54,6 +69,7 @@ All seeding remains single-threaded. See [CLI and table-format details](bench/RE
 | `subseqhash3_compute_one_substitution()` | 1 | E | One seed of length n-E |
 | `subseqhash3_compute_pivot_seeds()` | E | 1 | Up to k=n-1 pivot orders per family |
 | `subseqhash3_compute_pivot_repeats()` | E | 1 | Any positive r, batching independent families |
+| `subseqhash3_compute_deletion_seeds()` | 0 | E | Up to k=n-E original SubseqHash2 pivot orders |
 
 The single-seed API in `src/subseqhash3.h` uses a reduced DP with two
 substitution planes. Its SIMD path uses nonnegative cost scores, retained
@@ -68,11 +84,16 @@ but use boundary-to-pivot side directions, minimize psi, and maximize omega.
 They are a documented variant of the SubseqHash2 paper, not its original
 order or table-file format. See [pivot algorithm and usage](bench/PIVOTS.md).
 
-Both APIs return encoded seeds, source positions, substitution flags, and
+The mixed-edit APIs return encoded seeds, source positions, substitution flags, and
 scores through `SubseqHash3EditResult`. Release result contents with
 `subseqhash3_edit_results_destroy()`. Existing all-splits functions are
 unchanged. The required `src/ssh3_collisions.h` declaration is also included
 in version control so a fresh checkout can build.
+
+The deletion-only API in `src/ssh3_deletions.h` has its own tables, reusable
+workspace, and `SubseqHash3DeletionResult` with an integer omega. Free these
+results with `subseqhash3_deletion_results_destroy()`; original SubseqHash2
+text tables can be loaded with `subseqhash3_deletion_tables_import()`.
 
 ## Benchmarks and validation
 
