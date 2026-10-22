@@ -390,6 +390,20 @@ static void compact_padding(uint16_t *p,size_t d,const uint16_t *indices) {
     }
 #endif
 }
+/* Reflect residue order for the circular join, keeping residue zero fixed. */
+static void reflect_boundary(uint16_t *dst,const uint16_t *src,size_t d) {
+    size_t r=1; dst[0]=src[0];
+#if DEL_SIMD
+    const __m512i reverse=_mm512_set_epi16(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+        16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31);
+    for (;r+32<=d;r+=32) {
+        const __m512i values=_mm512_loadu_si512((const void *)(src+d-r-31));
+        _mm512_storeu_si512((void *)(dst+r),_mm512_permutexvar_epi16(reverse,values));
+    }
+#endif
+    for (;r<d;++r) dst[r]=src[d-r];
+}
+
 static int build_compact(SubseqHash3DeletionWorkspace *w,const uint8_t *s,
     const SubseqHash3DeletionSide *t,SideDP *out,int left,
     const uint8_t *anchors,const uint8_t *budgets,size_t maximum) {
@@ -561,9 +575,9 @@ static int build_compact(SubseqHash3DeletionWorkspace *w,const uint8_t *s,
                     if (left) {
                         memcpy(bounds->low+at,lo,d*sizeof(*lo));
                         memcpy(bounds->high+at,hi,d*sizeof(*hi));
-                    } else for (r=0;r<d;++r) {
-                        const size_t dst=r?d-r:0;
-                        bounds->low[at+dst]=lo[r]; bounds->high[at+dst]=hi[r];
+                    } else {
+                        reflect_boundary(bounds->low+at,lo,d);
+                        reflect_boundary(bounds->high+at,hi,d);
                     }
                 }
             }
@@ -613,19 +627,12 @@ static int build_inward_one(SubseqHash3DeletionWorkspace *w,InwardDP *dp,
     return 0;
 }
 
-static int build_inward(SubseqHash3DeletionWorkspace *w,InwardDP *dp,
-    const uint8_t *s,const SubseqHash3DeletionSide *t,size_t maximum,int left) {
-    if (w->d==1) return build_inward_one(w,dp,s,t,maximum,left);
-    const size_t d=w->d,n=w->n,e=w->e,stride=((d+31)&~(size_t)31)+32;
-    const size_t cells=n*(e+1)*stride,blocks=(d+31)/32,rows=4*maximum;
-    size_t j,h,r;
-    if (cells>SIZE_MAX/(2*sizeof(uint16_t))) return -1;
-    if (cells>dp->capacity) {
-        uint16_t *memory=aligned_array(2*cells*sizeof(*memory));
-        if (!memory) return -1;
-        free(dp->low); dp->low=memory; dp->capacity=cells;
-    }
-    dp->high=dp->low+dp->capacity; dp->stride=stride;
+/* Preparation is scoped to one call: imported tables can be changed between
+   calls using the same public workspace. */
+static int prepare_inward(SubseqHash3DeletionWorkspace *w,
+    const SubseqHash3DeletionSide *t,size_t maximum,int left) {
+    const size_t d=w->d,blocks=(d+31)/32,rows=4*maximum;
+    size_t j,r;
     if (rows*d>w->packed_capacity) {
         uint8_t *memory=malloc(rows*d*sizeof(*memory));
         if (!memory) return -1;
@@ -694,10 +701,31 @@ static int build_inward(SubseqHash3DeletionWorkspace *w,InwardDP *dp,
 #if DEL_SIMD
     wide|=_mm512_cmp_epu64_mask(magnitudes,_mm512_set1_epi64(127),_MM_CMPINT_GT)!=0;
 #endif
-    if (wide) return 1;
+    return wide?1:0;
+}
+
+static int build_inward(SubseqHash3DeletionWorkspace *w,InwardDP *dp,
+    const uint8_t *s,const SubseqHash3DeletionSide *t,size_t maximum,int left,
+    const SubseqHash3DeletionWorkspace *prepared) {
+    if (w->d==1) return build_inward_one(w,dp,s,t,maximum,left);
+    const size_t d=w->d,n=w->n,e=w->e,stride=((d+31)&~(size_t)31)+32;
+    const size_t cells=n*(e+1)*stride,blocks=(d+31)/32;
+    size_t j,h,r;
+    if (cells>SIZE_MAX/(2*sizeof(uint16_t))) return -1;
+    if (cells>dp->capacity) {
+        uint16_t *memory=aligned_array(2*cells*sizeof(*memory));
+        if (!memory) return -1;
+        free(dp->low); dp->low=memory; dp->capacity=cells;
+    }
+    dp->high=dp->low+dp->capacity; dp->stride=stride;
+    if (!prepared) {
+        int status=prepare_inward(w,t,maximum,left);
+        if (status) return status;
+        prepared=w;
+    }
     uint16_t *low=dp->low,*high=dp->high;
-    const uint8_t *packed=w->packed_A;
-    const uint32_t *masks=w->inward_masks;
+    const uint8_t *packed=prepared->packed_A;
+    const uint32_t *masks=prepared->inward_masks;
     const size_t *shifts=t->C;
     for (h=0;h<=e;++h) {
         const size_t at=inward_state(dp,h,h,e);
@@ -839,6 +867,14 @@ static void trace_window_side(const uint8_t *s,size_t e,size_t d,
     SubseqHash3DeletionResult *out) {
     size_t j=l-h;
     while (j) {
+        if (!h) {
+            while (j) {
+                const size_t pos=left?anchor-j:anchor+j;
+                const size_t dst=left?pivot-j:pivot+j;
+                out->seed[dst]=s[pos]; out->positions[dst]=pos; --j;
+            }
+            break;
+        }
         const size_t r=left?residue:(residue?d-residue:0);
         const uint16_t *scores=high?dp->high:dp->low;
         if (h && scores[inward_state(dp,l,h,e)+r]==
@@ -862,13 +898,36 @@ static const uint16_t *window_scores(const SubseqHash3DeletionWorkspace *w,
     return (high?dp->high:dp->low)+inward_state(dp,l,h,w->e);
 }
 
+/* Return the first right residue in the original strict witness order. */
+static size_t compact_witness(const uint16_t *l,const uint16_t *r,size_t d,
+    size_t offset,unsigned cost) {
+    if ((unsigned)l[offset]+r[0]==cost) return 0;
+#if DEL_SIMD
+    const __m512i target=_mm512_set1_epi16((short)cost);
+    for (size_t end=d;end>1;) {
+        const size_t begin=end>33?end-32:1,lanes=end-begin;
+        const __mmask32 active=lanes==32?UINT32_MAX:(UINT32_C(1)<<lanes)-1;
+        const __m512i sum=_mm512_adds_epu16(
+            _mm512_loadu_si512((const void *)(l+addmod(begin,offset,d))),
+            _mm512_loadu_si512((const void *)(r+begin)));
+        const uint32_t equal=active&_mm512_cmpeq_epi16_mask(sum,target);
+        if (equal) return d-(begin+31-(size_t)__builtin_clz(equal));
+        end=begin;
+    }
+#else
+    for (size_t q=1;q<d;++q)
+        if ((unsigned)l[submod(offset,q,d)]+r[d-q]==cost) return q;
+#endif
+    return d;
+}
+
 static int compute_compact_seeds(const uint8_t *s,const SubseqHash3DeletionTables *t,
     const size_t *pivots,size_t count,SubseqHash3DeletionResult *out,
     SubseqHash3DeletionWorkspace *w,size_t maxleft,size_t maxright,int outward) {
     const size_t n=w->n,k=w->k,e=w->e,d=w->d;
     if (!outward) {
-        int status=build_inward(w,&w->inward_left,s,&t->left,maxleft,1);
-        if (!status) status=build_inward(w,&w->inward_right,s,&t->right,maxright,0);
+        int status=build_inward(w,&w->inward_left,s,&t->left,maxleft,1,NULL);
+        if (!status) status=build_inward(w,&w->inward_right,s,&t->right,maxright,0,NULL);
         if (status) return status;
     }
     for (size_t a=0;a<count;++a) {
@@ -884,8 +943,10 @@ static int compute_compact_seeds(const uint8_t *s,const SubseqHash3DeletionTable
                 const uint16_t *r=window_scores(w,i,e-h,0,outward,t->right_sign[row]>0);
                 const size_t psi=pass?inward_first(w,l,r,t->pivot_C[row]):0;
                 if (psi>bestpsi || psi==d) continue;
-                const unsigned cost=inward_join(l,r,d,submod(t->pivot_C[row],psi,d));
-                if (cost==UINT16_MAX) continue;
+                const size_t shift=submod(t->pivot_C[row],psi,d);
+                const unsigned cost=p==0?(unsigned)l[0]+r[shift]:
+                    p==k-1?(unsigned)l[shift?d-shift:0]+r[0]:inward_join(l,r,d,shift);
+                if (cost>=UINT16_MAX) continue;
                 const int64_t score=127*(int64_t)(k-1)-(int64_t)cost+t->pivot_A[row];
                 if (psi<bestpsi || score>best) {
                     bestpsi=psi; best=score; besti=i; bestside=cost;
@@ -897,10 +958,8 @@ static int compute_compact_seeds(const uint8_t *s,const SubseqHash3DeletionTable
         const size_t h=besti-p,row=4*p+s[besti];
         const uint16_t *l=window_scores(w,besti,h,1,outward,t->left_sign[row]>0);
         const uint16_t *r=window_scores(w,besti,e-h,0,outward,t->right_sign[row]>0);
-        for (bestq=0;bestq<d;++bestq) {
-            const size_t lr=submod(submod(bestpsi,t->pivot_C[row],d),bestq,d),rr=bestq?d-bestq:0;
-            if ((unsigned)l[lr]+r[rr]==bestside) break;
-        }
+        bestq=compact_witness(l,r,d,submod(bestpsi,t->pivot_C[row],d),
+            (unsigned)bestside);
         if (bestq==d) goto failed;
         out[a].length=k; out[a].deletions=e; out[a].psi=bestpsi; out[a].omega=best;
         out[a].seed=malloc(k); out[a].positions=malloc(k*sizeof(size_t));
@@ -1230,6 +1289,7 @@ int subseqhash3_seed_deletion_windows(const uint8_t *s,size_t length,size_t n,
     SubseqHash3DeletionResult *out=NULL;
     DeletionWindowCache *cache=NULL;
     size_t slots=0;
+    SubseqHash3DeletionWorkspace prepared_left={0},prepared_right={0};
     int status=-1,shared=0;
     if (!s || !t || !callback || !n || n>256 || length<n || e>=n ||
         !count || count>n-e ||
@@ -1253,6 +1313,9 @@ int subseqhash3_seed_deletion_windows(const uint8_t *s,size_t length,size_t n,
                 t->right.A[j]<-127 || t->right.A[j]>127) { shared=0; break; }
     }
     if (shared) {
+        prepared_left.d=prepared_right.d=t->d;
+        if (t->d>1 && (prepare_inward(&prepared_left,&t->left,count-1,1) ||
+            prepare_inward(&prepared_right,&t->right,n-e-1,0))) goto done;
         slots=count+e; cache=calloc(slots,sizeof(*cache));
         if (!cache) goto done;
         for (size_t j=0;j<slots;++j) cache[j].anchor=SIZE_MAX;
@@ -1267,10 +1330,10 @@ int subseqhash3_seed_deletion_windows(const uint8_t *s,size_t length,size_t n,
                 if (c->anchor!=anchor) {
                     uint8_t input[256]={0};
                     for (size_t l=1;l<n && l<=anchor;++l) input[l-1]=s[anchor-l];
-                    if (build_inward(w,&c->left,input,&t->left,count-1,1)) goto done;
+                    if (build_inward(w,&c->left,input,&t->left,count-1,1,&prepared_left)) goto done;
                     memset(input,0,n);
                     for (size_t l=1;l<n && l<length-anchor;++l) input[n-l]=s[anchor+l];
-                    if (build_inward(w,&c->right,input,&t->right,n-e-1,0)) goto done;
+                    if (build_inward(w,&c->right,input,&t->right,n-e-1,0,&prepared_right)) goto done;
                     c->anchor=anchor;
                 }
             }
@@ -1283,6 +1346,8 @@ int subseqhash3_seed_deletion_windows(const uint8_t *s,size_t length,size_t n,
     status=0;
 done:
     if (cache) for (size_t j=0;j<slots;++j) { free(cache[j].left.low); free(cache[j].right.low); }
+    free(prepared_left.packed_A); free(prepared_left.inward_masks);
+    free(prepared_right.packed_A); free(prepared_right.inward_masks);
     free(cache); subseqhash3_deletion_results_destroy(out,out?count:0); free(out);
     subseqhash3_deletion_workspace_destroy(w);
     return status;

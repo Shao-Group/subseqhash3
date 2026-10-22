@@ -553,8 +553,11 @@ static int choose_pivot_zero(const uint8_t *s,size_t n,size_t edits,size_t pivot
                 rs=dp_state(rd,n-input-1,right_del,right_e);
                 lc=(t->pivot_left_sign[table]>0?ld->maximum:ld->minimum)+ls;
                 rc=(t->pivot_right_sign[table]>0?rd->maximum:rd->minimum)+rs;
-                if (d==1) {
-                    const unsigned scalar=(unsigned)lc[0]+rc[0];
+                if (d==1 || pivot==0 || !right_length) {
+                    const size_t shift=t->pivot_C[table];
+                    const unsigned scalar=pivot==0?(unsigned)lc[0]+rc[shift]:
+                        !right_length?(unsigned)lc[shift?d-shift:0]+rc[0]:
+                        (unsigned)lc[0]+rc[0];
                     cost=_mm512_set1_epi16((short)(scalar<UNREACHABLE?scalar:UNREACHABLE));
                 } else if (d<=32) {
                     cost=_mm512_adds_epu16(_mm512_load_si512((const void *)lc),
@@ -689,48 +692,79 @@ static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
     size_t residue,int type,SubseqHash3EditResult *out,int outward,
     size_t anchor,size_t pivot) {
     size_t retained=l-h;
+    /* Parent-backed small-D traceback needs no score loads or candidate
+       search. Keep its tight loop separate from score-based recovery. */
+    if (dp->parent) {
+        while (retained) {
+            const unsigned packed=dp->parent[dp_parent(dp,l,h,e)+residue];
+            unsigned code=type==1?(packed&15u):(packed>>4);
+            if (!code) { --l; --h; continue; }
+            --code;
+            const unsigned symbol=code/2;
+            type=(int)(code%2)+1;
+            const size_t pos=outward?(reverse?anchor+l:anchor-l):
+                (reverse?n-l:l-1);
+            const size_t dst=outward?(reverse?pivot+retained:pivot-retained):
+                (reverse?out->length-retained:retained-1);
+            const unsigned changed=symbol!=s[pos];
+            out->seed[dst]=(uint8_t)symbol; out->positions[dst]=pos;
+            out->substituted[dst]=(uint8_t)changed;
+            e-=changed;
+            size_t shift=t->C[4*(retained-1)+symbol];
+            if (reverse && shift) shift=dp->d-shift;
+            residue=subtract_residue(residue,shift,dp->d);
+            --retained; --l;
+        }
+        return;
+    }
     while (retained) {
+        if (!h && !e) {
+            /* The remaining witness is fixed once all edits are consumed. */
+            while (retained) {
+                const size_t pos=outward?(reverse?anchor+l:anchor-l):
+                    (reverse?n-l:l-1);
+                const size_t dst=outward?(reverse?pivot+retained:pivot-retained):
+                    (reverse?out->length-retained:retained-1);
+                out->seed[dst]=s[pos]; out->positions[dst]=pos;
+                out->substituted[dst]=0; --retained; --l;
+            }
+            break;
+        }
         const size_t current=dp_state(dp,l,h,e)+residue;
         const unsigned best=type==1?dp->minimum[current]:dp->maximum[current];
-        const unsigned original=s[reverse?n-l:l-1];
+        const unsigned original=s[outward?(reverse?anchor+l:anchor-l):
+            (reverse?n-l:l-1)];
         unsigned candidate;
         size_t position,output,shift;
         unsigned symbol=original;
         /* Recover only the chosen witnesses from already stored scores.
            Deletion, ascending changed bases, then unchanged reproduce the
            reference's strict-update tie order without storing any parents. */
-        if (dp->parent) {
-            const unsigned packed=dp->parent[dp_parent(dp,l,h,e)+residue];
-            unsigned code=type==1?(packed&15u):(packed>>4);
-            if (!code) { --l; --h; continue; }
-            --code; symbol=code/2; type=(int)(code%2)+1;
-        } else {
-            if (h) {
-                const size_t previous=dp_state(dp,l-1,h-1,e)+residue;
-                const unsigned value=type==1?dp->minimum[previous]:dp->maximum[previous];
-                if (value==best) { --l; --h; continue; }
-            }
-            for (candidate=0;candidate<4;++candidate) {
-                const unsigned a=candidate<3?
-                    candidate+(candidate>=original):original;
-                const size_t changed=a!=original;
-                size_t q,src,table;
-                int source_type,add;
-                unsigned value;
-                if (changed?(!e):(e>=retained)) continue;
-                shift=t->C[4*(retained-1)+a];
-                if (reverse && shift) shift=dp->d-shift;
-                q=subtract_residue(residue,shift,dp->d);
-                table=(4*(retained-1)+a)*dp->d+
-                    (reverse && residue?dp->d-residue:residue);
-                source_type=t->B1[table]>0?type:3-type;
-                add=127+(type==1?t->signed_A[table]:-t->signed_A[table]);
-                src=dp_state(dp,l-1,h,e-changed)+q;
-                value=source_type==1?dp->minimum[src]:dp->maximum[src];
-                if (value!=UNREACHABLE && value+(unsigned)add==best) {
-                    symbol=a; type=source_type;
-                    break;
-                }
+        if (h) {
+            const size_t previous=dp_state(dp,l-1,h-1,e)+residue;
+            const unsigned value=type==1?dp->minimum[previous]:dp->maximum[previous];
+            if (value==best) { --l; --h; continue; }
+        }
+        for (candidate=0;candidate<4;++candidate) {
+            const unsigned a=candidate<3?
+                candidate+(candidate>=original):original;
+            const size_t changed=a!=original;
+            size_t q,src,table;
+            int source_type,add;
+            unsigned value;
+            if (changed?(!e):(e>=retained)) continue;
+            shift=t->C[4*(retained-1)+a];
+            if (reverse && shift) shift=dp->d-shift;
+            q=subtract_residue(residue,shift,dp->d);
+            table=(4*(retained-1)+a)*dp->d+
+                (reverse && residue?dp->d-residue:residue);
+            source_type=t->B1[table]>0?type:3-type;
+            add=127+(type==1?t->signed_A[table]:-t->signed_A[table]);
+            src=dp_state(dp,l-1,h,e-changed)+q;
+            value=source_type==1?dp->minimum[src]:dp->maximum[src];
+            if (value!=UNREACHABLE && value+(unsigned)add==best) {
+                symbol=a; type=source_type;
+                break;
             }
         }
         position=outward?(reverse?anchor+l:anchor-l):(reverse?n-l:l-1);
@@ -754,21 +788,6 @@ static void outward_input(uint8_t *dst,const uint8_t *s,size_t n,size_t anchor) 
     for (size_t j=0;j<anchor;++j) dst[j]=s[anchor-1-j];
     dst[anchor]=s[anchor];
     for (size_t j=anchor+1;j<n;++j) dst[j]=s[n+anchor-j];
-}
-static void copy_boundary(PivotDP *dst,const PivotDP *src,size_t l,size_t h,size_t k) {
-    const size_t retained=l-h,edits=dst->edits,d=dst->d;
-    const size_t minimum=edits>k-retained?edits-(k-retained):0;
-    for (size_t e=0;e<=edits;++e) {
-        const size_t at=dp_state(dst,l,h,e),from=dp_state(src,l,h,e);
-        if (e>retained || e<minimum) {
-            memset(dst->minimum+at,255,dst->stride*sizeof(uint16_t));
-            memset(dst->maximum+at,255,dst->stride*sizeof(uint16_t));
-        } else {
-            memcpy(dst->minimum+at,src->minimum+from,d*sizeof(uint16_t));
-            memcpy(dst->maximum+at,src->maximum+from,d*sizeof(uint16_t));
-            if (dst->stride>1) { circular_padding(dst->minimum+at,d,dst->padding); circular_padding(dst->maximum+at,d,dst->padding); }
-        }
-    }
 }
 /* Fixed global anchor: its outward prefixes do not depend on window start.
    A ring retains exactly the anchors touched by the requested pivot prefix. */
@@ -816,15 +835,11 @@ static int compute_outward_seeds(const uint8_t *s,size_t n,size_t edits,
                 cached[slot]=i;
             }
             lefts[i-p]=l; rights[i-p]=r;
-            if (!w->window_cache) {
-                copy_boundary(&w->left,l,i,i-p,k);
-                copy_boundary(&w->right,r,n-i-1,1-(i-p),k);
-            }
         }
         PivotChoice choice;
         SubseqHash3EditResult *out=results+a;
         if (choose_pivot(s,n,edits,p,t,&w->left,&w->right,w->scratch,
-                w->window_cache?lefts:NULL,w->window_cache?rights:NULL,&choice)) return -1;
+                lefts,rights,&choice)) return -1;
         out->seed=malloc(k); out->positions=malloc(k*sizeof(*out->positions));
         out->substituted=malloc(k);
         if (!out->seed || !out->positions || !out->substituted) return -1;
@@ -834,13 +849,12 @@ static int compute_outward_seeds(const uint8_t *s,size_t n,size_t edits,
         out->substituted[p]=(uint8_t)(choice.symbol!=s[choice.input_pivot]);
         const size_t i=choice.input_pivot,slot=i%2,table=4*p+choice.symbol;
         const size_t left_del=i-p,changed=out->substituted[p];
-        outward_input(transformed,s,n,i);
         PivotDP *l=&w->outward_left[slot],*r=&w->outward_right[slot];
         if (w->window_cache && window_sides(w,n,edits,t,i,&l,&r)) return -1;
-        trace_side(transformed,n,l,&t->left,0,i,left_del,
+        trace_side(s,n,l,&t->left,0,i,left_del,
             choice.left_substitutions,choice.left_residue,
             t->pivot_left_sign[table]>0?2:1,out,1,i,p);
-        trace_side(transformed,n,r,&t->right,1,n-i-1,1-left_del,
+        trace_side(s,n,r,&t->right,1,n-i-1,1-left_del,
             edits-changed-choice.left_substitutions,choice.right_residue,
             t->pivot_right_sign[table]>0?2:1,out,1,i,p);
     }
@@ -892,13 +906,22 @@ static int compute_pivot_seeds_impl(const uint8_t *s,size_t n,size_t edits,
         workspace->scratch=scratch; workspace->scratch_capacity=t->d;
     }
     scratch=workspace->scratch;
-    if (dp_reserve(left,&workspace->left_layers,max_pivot+2,edits,t->d) ||
-        dp_reserve(right,&workspace->right_layers,n-min_pivot,edits,t->d))
-        goto done;
     if (outward) {
+        /* Reserve once for the complete pivot range. Growing the left side
+           by one layer per anchor repeatedly frees and faults large arrays. */
+        if (!workspace->window_cache) for (size_t slot=0;slot<2;++slot) {
+            if (dp_reserve(&workspace->outward_left[slot],
+                    &workspace->outward_left_layers[slot],max_pivot+3,edits,t->d) ||
+                dp_reserve(&workspace->outward_right[slot],
+                    &workspace->outward_right_layers[slot],n-min_pivot+1,edits,t->d))
+                goto done;
+        }
         status=compute_outward_seeds(s,n,edits,t,pivots,count,results,workspace);
         goto done;
     }
+    if (dp_reserve(left,&workspace->left_layers,max_pivot+2,edits,t->d) ||
+        dp_reserve(right,&workspace->right_layers,n-min_pivot,edits,t->d))
+        goto done;
     if (left->parent) dp_build(left,s,n,max_pivot+1,t,0,1);
     else dp_build(left,s,n,max_pivot+1,t,0,0);
     if (right->parent) dp_build(right,s,n,n-min_pivot-1,t,1,1);

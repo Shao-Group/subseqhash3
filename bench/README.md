@@ -171,3 +171,9 @@ The [long-sequence sliding-window comparison](WINDOWS.md) measures inward
 against outward with anchor DPs shared across overlapping windows, plus the
 previous independent-window loop. Run `make bench-windows` for the sweep;
 `make check-windows` checks exact scores and witnesses for the window APIs.
+
+The [outward speed improvements](OUTWARD_SPEED.md) compare the subsequent
+optimization against the existing shared-window implementation, covering
+fresh and reused single-window workspaces and length-4096 sequences for both
+deletions and repeats. Run `python3 bench/run_outward_speed.py --help` for
+the paired before/after sweep, including complete output checksum checks.

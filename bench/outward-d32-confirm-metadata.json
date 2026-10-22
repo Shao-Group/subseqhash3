@@ -1,0 +1,22 @@
+{
+  "timestamp_utc": "2026-10-22T12:41:57.780076+00:00",
+  "baseline_ref": "e714ebfab4f47e7e541c78a6e31027de4f0431e5",
+  "cpu": 0,
+  "cpu_model": "Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz",
+  "compiler_flags": "-O3 -std=c99 -Wall -Wextra -Wpedantic -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512",
+  "samples": 7,
+  "residues": [
+    32
+  ],
+  "protocol": "One thread; median complete calls, alternating method and executable order; cold single-window APIs, reused-workspace independent window loop at length 256, shared windows at lengths 256/4096. Includes allocation, traceback, checksum callback and cleanup; excludes table generation and disk I/O. Exact before/after checksums required for every algorithm, method and condition, including inward controls.",
+  "source_sha256": {
+    "src/ssh3_pivots.c": "8a444610398c54e3a16e5a6ef8ede8925257644be6ad2be0e705b0d27756f660",
+    "src/ssh3_deletions.c": "12d1ef235faf97f15ebf250a8ed64e0ff3fb7e5c0d135e802da9278d5a9039ec",
+    "bench/windows.c": "8cee08e0d4986a52a6dd60ff7f70642a011bdafe40ecb24ffd9a9c780e83cbf1",
+    "bench/run_outward_speed.py": "fdc63431f32b37cb582145b782861b9a3854474e10a4dcde9e9645620b9f1ded"
+  },
+  "executable_sha256": {
+    "before": "24b1a874cc75651a652e559d905b1082d87da9a47492ef20ef98990295842969",
+    "after": "2774ea6713bde4965aa3f43d6bdfd8fb9c535e367e250aa833a0708780dd2033"
+  }
+}

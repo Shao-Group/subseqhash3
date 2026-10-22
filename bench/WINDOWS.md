@@ -134,6 +134,10 @@ different families and are not expected to have equal checksums.
 
 ## Measured results (2026-10-21)
 
+These are the original shared-window measurements. For the subsequent
+outward optimization and its before/after timings, see
+[Outward speed improvements](OUTWARD_SPEED.md).
+
 Sharing reduces outward runtime, but the measured difference from inward
 does not disappear. On the same length-256 input, sharing accelerates outward
 by **2.15–3.26x for deletions** and **2.44–4.50x for repeats**. On length-4096
