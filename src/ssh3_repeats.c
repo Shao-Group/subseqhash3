@@ -55,11 +55,24 @@ static int write_result(FILE *out,size_t repeat,size_t k,size_t sequence,
     return fprintf(out,",%zu,%.0f\n",result->psi,result->omega)<0?-1:0;
 }
 
+typedef struct {
+    FILE *out;
+    size_t k,sequence;
+} RepeatsCSV;
+static int write_window(size_t start,const SubseqHash3EditResult *results,
+    size_t count,void *context) {
+    RepeatsCSV *csv=context;
+    for (size_t i=0;i<count;++i)
+        if (write_result(csv->out,i,csv->k,csv->sequence,start,results+i)) {
+            perror("writing repeats CSV"); return -1;
+        }
+    return 0;
+}
+
 static int process_sequence(FILE *out,const char *line,size_t length,size_t index,
-    size_t w,size_t e,size_t repeats,const SubseqHash3PivotTableFile *tables,
-    SubseqHash3PivotWorkspace *workspace,SubseqHash3EditResult *results,int outward) {
+    size_t w,size_t e,size_t repeats,const SubseqHash3PivotTableFile *tables,int outward) {
     uint8_t *encoded;
-    size_t i,start;
+    size_t i;
     if (length<w) {
         fprintf(stderr,"sequence %zu has length %zu, shorter than W=%zu\n",index,length,w);
         return -1;
@@ -77,22 +90,13 @@ static int process_sequence(FILE *out,const char *line,size_t length,size_t inde
             free(encoded); return -1;
         }
     }
-    for (start=0;start<=length-w;++start) {
-        if ((outward?subseqhash3_compute_outward_pivot_repeats_with_workspace:
-                subseqhash3_compute_pivot_repeats_with_workspace)(encoded+start,w,e,
-                tables->tables,tables->count,repeats,results,workspace)) {
-            fprintf(stderr,"pivot seeding failed for sequence %zu, window %zu\n",index,start);
-            free(encoded); return -1;
-        }
-        for (i=0;i<repeats;++i)
-            if (write_result(out,i,w-1,index,start,results+i)) {
-                perror("writing repeats CSV");
-                free(encoded); return -1;
-            }
-        subseqhash3_edit_results_destroy(results,repeats);
-    }
+    RepeatsCSV csv={out,w-1,index};
+    const int status=subseqhash3_seed_repeats_windows(encoded,length,w,e,
+        tables->tables,tables->count,repeats,
+        outward?SUBSEQHASH3_OUTWARD:SUBSEQHASH3_INWARD,write_window,&csv);
+    if (status) fprintf(stderr,"pivot seeding failed for sequence %zu\n",index);
     free(encoded);
-    return 0;
+    return status;
 }
 
 int ssh3_repeats_main(int argc,char **argv) {
@@ -102,8 +106,6 @@ int ssh3_repeats_main(int argc,char **argv) {
     ssize_t got;
     FILE *input=NULL,*output=NULL;
     SubseqHash3PivotTableFile tables={0};
-    SubseqHash3PivotWorkspace *workspace=NULL;
-    SubseqHash3EditResult *results=NULL;
     struct timespec wall_start,wall_end,cpu_start,cpu_end;
     int status=EXIT_FAILURE,outward=1,traversal_set=0;
     char *positional[8];
@@ -126,7 +128,7 @@ int ssh3_repeats_main(int argc,char **argv) {
     if ((argc!=7 && argc!=8) || parse_size(argv[2],&w) ||
         parse_size(argv[3],&e) || parse_size(argv[4],&d) ||
         parse_size(argv[5],&repeats) || w<2 || w>257 || !d || !repeats ||
-        e>w-1 || repeats>SIZE_MAX/sizeof(*results)) {
+        e>w-1 || repeats>SIZE_MAX/sizeof(SubseqHash3EditResult)) {
         help(stderr); return EXIT_FAILURE;
     }
     needed=1+(repeats-1)/(w-1);
@@ -158,9 +160,6 @@ int ssh3_repeats_main(int argc,char **argv) {
         fputs("pivot table dimensions do not match W, D, or required family count\n",stderr);
         goto done;
     }
-    results=calloc(repeats,sizeof(*results));
-    workspace=subseqhash3_pivot_workspace_create();
-    if (!results || !workspace) goto done;
     output=fopen(argv[6],"w");
     if (!output) { perror(argv[6]); goto done; }
     if (fputs("repeat,family,pivot,sequence,window_start,substitutions,deletions,"
@@ -171,7 +170,7 @@ int ssh3_repeats_main(int argc,char **argv) {
         if (!length) {
             fprintf(stderr,"sequence %zu is empty\n",index); goto done;
         }
-        if (process_sequence(output,line,length,index,w,e,repeats,&tables,workspace,results,outward))
+        if (process_sequence(output,line,length,index,w,e,repeats,&tables,outward))
             goto done;
         ++index;
     }
@@ -188,9 +187,7 @@ int ssh3_repeats_main(int argc,char **argv) {
         (double)(cpu_end.tv_nsec-cpu_start.tv_nsec)/1000000000.0);
     status=EXIT_SUCCESS;
 done:
-    if (results) subseqhash3_edit_results_destroy(results,repeats);
-    free(results); free(generated); free(line);
-    subseqhash3_pivot_workspace_destroy(workspace);
+    free(generated); free(line);
     subseqhash3_pivot_table_file_close(&tables);
     if (input && fclose(input)) status=EXIT_FAILURE;
     if (output && fclose(output)) status=EXIT_FAILURE;

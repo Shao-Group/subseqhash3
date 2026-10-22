@@ -72,6 +72,17 @@ int subseqhash3_compute_inward_deletion_seeds_with_workspace(const uint8_t *,siz
 int subseqhash3_compute_inward_deletion_seeds(const uint8_t *,size_t n,size_t deletions,
     const SubseqHash3DeletionTables *,const size_t *pivots,size_t count,
     SubseqHash3DeletionResult *);
+/* Same streaming callback/lifetime/position rules as repeats_windows.
+   Request the first count pivot orders (1..window-deletions). Wide imported
+   coefficients and direct one-deletion cases retain the single-window solver.
+   Tables must remain immutable until this call returns. */
+typedef int (*SubseqHash3DeletionWindowCallback)(size_t window_start,
+    const SubseqHash3DeletionResult *results,size_t count,void *context);
+int subseqhash3_seed_deletion_windows(const uint8_t *sequence,size_t length,
+    size_t window,size_t deletions,const SubseqHash3DeletionTables *tables,
+    size_t count,SubseqHash3Traversal traversal,
+    SubseqHash3DeletionWindowCallback callback,void *context);
+
 #ifdef __cplusplus
 }
 #endif

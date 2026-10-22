@@ -1,0 +1,29 @@
+{
+  "timestamp_utc": "2026-10-22T01:19:10.713129+00:00",
+  "machine": {
+    "system": "Linux",
+    "node": "e5-cse-cbmxs01",
+    "release": "6.8.0-146-generic",
+    "version": "#146-Ubuntu SMP PREEMPT_DYNAMIC Thu Sep  3 16:12:30 UTC 2026",
+    "machine": "x86_64",
+    "processor": "x86_64"
+  },
+  "cpu_model": "Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz",
+  "cpu": 0,
+  "compiler_flags": "-O3 -std=c99 -Wall -Wextra -Wpedantic -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512",
+  "lengths": [
+    256,
+    4096
+  ],
+  "samples": 3,
+  "protocol": "single thread, sequential, median of alternating method order samples; entire sequence call including cold anchor-cache allocation, warm-up windows, output allocation, traceback, checksum callback and cleanup; excludes table generation and disk I/O",
+  "equivalence": "exact output checksum of first 64 windows versus independent-window APIs before timing; full-sequence outward checksums also compared when independent mode is timed",
+  "source_sha256": {
+    "src/ssh3_pivots.c": "1327a6e3d78960526f05a43ae70ae792ca5a9870995c87ec8eb0e925455329c6",
+    "src/ssh3_deletions.c": "4a9461193fbc61a6d7e5e761377fc57f86ac3bb6482c815620a0e91871afb888",
+    "src/ssh3_pivots.h": "bbe62a0a6c1afa42c0db7c02aa1a703d81b65a810f7e1b103584de50cdaaff1f",
+    "src/ssh3_deletions.h": "dbaa7d659f8aca204ad455ec80935372e8ff6102f011ab4cce1fb1d3bc1639c1",
+    "bench/windows.c": "8cee08e0d4986a52a6dd60ff7f70642a011bdafe40ecb24ffd9a9c780e83cbf1",
+    "bench/run_windows.py": "3bae150542853f44dd5b57fa1d8a3cfe48f3f9c328af63ef300960a8573db5c6"
+  }
+}

@@ -41,10 +41,26 @@ static int alias(const char *a,const char *b) {
     struct stat x,y;
     return !strcmp(a,b) || (!stat(a,&x) && !stat(b,&y) && x.st_dev==y.st_dev && x.st_ino==y.st_ino);
 }
+typedef struct {
+    FILE *out;
+    size_t sequence;
+} DeletionsCSV;
+static int write_window(size_t start,const SubseqHash3DeletionResult *results,
+    size_t count,void *context) {
+    DeletionsCSV *csv=context;
+    for (size_t a=0;a<count;++a) {
+        const SubseqHash3DeletionResult *r=results+a;
+        if (fprintf(csv->out,"%zu,%zu,%zu,%zu,",a,csv->sequence,start,r->deletions)<0) return -1;
+        for (size_t j=0;j<r->length;++j)
+            if (fputc("ACGT"[r->seed[j]],csv->out)==EOF) return -1;
+        if (fprintf(csv->out,",%zu,%" PRId64 "\n",r->psi,r->omega)<0) return -1;
+    }
+    return 0;
+}
 int ssh3_deletions_main(int argc,char **argv) {
     const char *args[7],*original=NULL;
     uint64_t values[4],seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
-    size_t w,e,d,r,seq=0,capacity=0,start,j,a;
+    size_t w,e,d,r,seq=0,capacity=0,j;
     int i,count=0,seed_set=0,inward=0,status=EXIT_FAILURE;
     FILE *in=NULL,*out=NULL;
     char *line=NULL,*generated=NULL;
@@ -52,8 +68,6 @@ int ssh3_deletions_main(int argc,char **argv) {
     ssize_t got;
     SubseqHash3DeletionTables tables={0};
     SubseqHash3PivotTableFile shared={0};
-    SubseqHash3DeletionResult *results=NULL;
-    SubseqHash3DeletionWorkspace *workspace=NULL;
     struct timespec before,after;
     if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) { help(stdout); return 0; }
     for (i=1;i<argc;++i) {
@@ -115,8 +129,6 @@ int ssh3_deletions_main(int argc,char **argv) {
         if (subseqhash3_deletion_tables_from_pivots(&tables,shared.tables)) goto done;
         subseqhash3_pivot_table_file_close(&shared);
     }
-    workspace=subseqhash3_deletion_workspace_create(); results=calloc(r,sizeof(*results));
-    if (!workspace || !results) goto done;
     out=fopen(args[5],"w"); if (!out) { perror(args[5]); goto done; }
     if (fputs("pivot,sequence,window_start,deletions,seed,psi,omega\n",out)==EOF) goto done;
     while ((got=getline(&line,&capacity,in))>=0) {
@@ -133,16 +145,9 @@ int ssh3_deletions_main(int argc,char **argv) {
             default: fprintf(stderr,"sequence %zu contains a character outside A/C/G/T\n",seq); goto done;
             }
         }
-        for (start=0;start<=length-w;++start) {
-            if ((inward?subseqhash3_compute_inward_deletion_seeds_with_workspace:
-                    subseqhash3_compute_deletion_seeds_with_workspace)(encoded+start,w,e,&tables,NULL,r,results,workspace)) goto done;
-            for (a=0;a<r;++a) {
-                if (fprintf(out,"%zu,%zu,%zu,%zu,",a,seq,start,e)<0) goto done;
-                for (j=0;j<w-e;++j) if (fputc("ACGT"[results[a].seed[j]],out)==EOF) goto done;
-                if (fprintf(out,",%zu,%" PRId64 "\n",results[a].psi,results[a].omega)<0) goto done;
-            }
-            subseqhash3_deletion_results_destroy(results,r);
-        }
+        DeletionsCSV csv={out,seq};
+        if (subseqhash3_seed_deletion_windows(encoded,length,w,e,&tables,r,
+                inward?SUBSEQHASH3_INWARD:SUBSEQHASH3_OUTWARD,write_window,&csv)) goto done;
         free(encoded); encoded=NULL; ++seq;
     }
     if (ferror(in) || fflush(out)) { fputs("deletion input/output error\n",stderr); goto done; }
@@ -152,8 +157,6 @@ int ssh3_deletions_main(int argc,char **argv) {
 done:
     if (in && fclose(in)) status=EXIT_FAILURE;
     if (out && fclose(out)) status=EXIT_FAILURE;
-    subseqhash3_deletion_results_destroy(results,results?r:0); free(results);
-    subseqhash3_deletion_workspace_destroy(workspace);
     subseqhash3_deletion_tables_destroy(&tables);
     subseqhash3_pivot_table_file_close(&shared);
     free(encoded); free(line); free(generated); return status;

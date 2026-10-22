@@ -19,6 +19,13 @@ typedef struct {
     uint32_t *right_reversed_B1_masks;
 } SubseqHash3PivotTables;
 
+/* CLI and long-sequence APIs default to outward. Single-window APIs retain
+   the traversal named/documented by each function. */
+typedef enum {
+    SUBSEQHASH3_OUTWARD=0,
+    SUBSEQHASH3_INWARD=1
+} SubseqHash3Traversal;
+
 typedef struct SubseqHash3PivotWorkspace SubseqHash3PivotWorkspace;
 SubseqHash3PivotWorkspace *subseqhash3_pivot_workspace_create(void);
 void subseqhash3_pivot_workspace_destroy(SubseqHash3PivotWorkspace *workspace);
@@ -68,6 +75,20 @@ int subseqhash3_compute_outward_pivot_repeats(const uint8_t *,size_t n,
 int subseqhash3_compute_outward_pivot_repeats_with_workspace(const uint8_t *,size_t n,
     size_t substitutions,const SubseqHash3PivotTables *,size_t table_count,
     size_t repeats,SubseqHash3EditResult *,SubseqHash3PivotWorkspace *);
+
+/* Seed every length-window substring, in increasing start order. Callback
+   results are borrowed until it returns; positions are relative to the window.
+   Return 0 on success, -1 on invalid input/allocation/seeding/callback failure.
+   A nonzero callback return stops processing. Tables must remain immutable for
+   the entire call. Outward shares anchor DPs across overlapping windows;
+   inward reuses workspace allocations and rebuilds the two boundary DPs.
+   Memory is bounded independently of sequence length. */
+typedef int (*SubseqHash3RepeatsWindowCallback)(size_t window_start,
+    const SubseqHash3EditResult *results,size_t count,void *context);
+int subseqhash3_seed_repeats_windows(const uint8_t *sequence,size_t length,
+    size_t window,size_t substitutions,const SubseqHash3PivotTables *tables,
+    size_t table_count,size_t repeats,SubseqHash3Traversal traversal,
+    SubseqHash3RepeatsWindowCallback callback,void *context);
 
 #ifdef __cplusplus
 }

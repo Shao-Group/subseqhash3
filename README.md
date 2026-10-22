@@ -180,6 +180,19 @@ The pivot construction is inspired by Xiang Li, Ke Chen, and Mingfu Shao,
 *Efficient seeding for error-prone sequences with SubseqHash2*,
 Bioinformatics 41(8), 2025, [doi:10.1093/bioinformatics/btaf418](https://doi.org/10.1093/bioinformatics/btaf418).
 
+## Long sequences and overlapping windows
+
+Both `repeats` and `deletions` seed every length-W window of each input line.
+Their outward default now caches anchor DPs across overlapping windows;
+`--inward` keeps the inward order. CSV output is unchanged for the same
+traversal, tables and parameters.
+
+The C APIs `subseqhash3_seed_repeats_windows()` and
+`subseqhash3_seed_deletion_windows()` emit one borrowed result array per
+window through a callback. They support both traversals and bound DP memory
+independently of input length. See [interfaces, sharing, runtime comparison
+and validation](bench/WINDOWS.md). `make test` includes exact window checks.
+
 ## Traversal optimization results
 
 All four traversal paths are optimized, with exact seed and witness parity

@@ -31,11 +31,12 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 $(PROGRAM): $(OBJECTS)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(PROGRAM) $(BUILD_DIR)/check-repeats $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-pivots
+test: $(PROGRAM) $(BUILD_DIR)/check-repeats $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/check-windows
 	$(PROGRAM) test
 	$(BUILD_DIR)/bench-pivots --check-only
 	$(BUILD_DIR)/check-deletions 2>$(BUILD_DIR)/deletions-test.log || { cat $(BUILD_DIR)/deletions-test.log >&2; exit 1; }
 	$(BUILD_DIR)/check-repeats 2>$(BUILD_DIR)/repeats-test.log || { cat $(BUILD_DIR)/repeats-test.log >&2; exit 1; }
+	$(BUILD_DIR)/check-windows
 
 $(BUILD_DIR)/check-repeats: tests/repeats.c $(BUILD_DIR)/subseqhash3.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/pivot_table_file.o $(BUILD_DIR)/table_file.o $(BUILD_DIR)/ssh3_tables.o $(BUILD_DIR)/ssh3_repeats.o $(BUILD_DIR)/ssh3_seeds.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -109,11 +110,11 @@ simd: clean-simd
 		CFLAGS="$(CFLAGS) $(SIMD_CFLAGS)" all
 
 clean-simd:
-	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single $(SIMD_BUILD_DIR)/check-repeats $(SIMD_BUILD_DIR)/repeats-test.log $(SIMD_BUILD_DIR)/check-deletions $(SIMD_BUILD_DIR)/bench-deletions $(SIMD_BUILD_DIR)/deletions-test.log $(SIMD_BUILD_DIR)/bench-deletions-speed $(SIMD_BUILD_DIR)/bench-deletions-traversal $(SIMD_BUILD_DIR)/bench-repeats-traversal $(SIMD_BUILD_DIR)/bench-traversal-speed $(SIMD_BUILD_DIR)/bench-traversal-matched
+	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single $(SIMD_BUILD_DIR)/check-repeats $(SIMD_BUILD_DIR)/repeats-test.log $(SIMD_BUILD_DIR)/check-deletions $(SIMD_BUILD_DIR)/bench-deletions $(SIMD_BUILD_DIR)/deletions-test.log $(SIMD_BUILD_DIR)/bench-deletions-speed $(SIMD_BUILD_DIR)/bench-deletions-traversal $(SIMD_BUILD_DIR)/bench-repeats-traversal $(SIMD_BUILD_DIR)/bench-traversal-speed $(SIMD_BUILD_DIR)/bench-traversal-matched $(SIMD_BUILD_DIR)/check-windows $(SIMD_BUILD_DIR)/bench-windows
 	rmdir $(SIMD_BUILD_DIR) 2>/dev/null || true
 
 clean: clean-simd
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single $(BUILD_DIR)/check-repeats $(BUILD_DIR)/repeats-test.log $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-deletions $(BUILD_DIR)/deletions-test.log $(BUILD_DIR)/bench-deletions-speed $(BUILD_DIR)/bench-deletions-traversal $(BUILD_DIR)/bench-repeats-traversal $(BUILD_DIR)/bench-traversal-speed $(BUILD_DIR)/bench-traversal-matched
+	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single $(BUILD_DIR)/check-repeats $(BUILD_DIR)/repeats-test.log $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-deletions $(BUILD_DIR)/deletions-test.log $(BUILD_DIR)/bench-deletions-speed $(BUILD_DIR)/bench-deletions-traversal $(BUILD_DIR)/bench-repeats-traversal $(BUILD_DIR)/bench-traversal-speed $(BUILD_DIR)/bench-traversal-matched $(BUILD_DIR)/check-windows $(BUILD_DIR)/bench-windows
 	rmdir $(BUILD_DIR) 2>/dev/null || true
 
 -include $(DEPS)
@@ -204,3 +205,17 @@ bench-traversal-speed: $(BUILD_DIR)/bench-traversal-speed
 
 check-traversal-speed: $(BUILD_DIR)/bench-traversal-speed
 	$(BUILD_DIR)/bench-traversal-speed --check-only
+
+$(BUILD_DIR)/check-windows: tests/windows.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+.PHONY: check-windows
+check-windows: $(BUILD_DIR)/check-windows
+	$(BUILD_DIR)/check-windows
+
+$(BUILD_DIR)/bench-windows: bench/windows.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+.PHONY: bench-windows
+bench-windows: $(BUILD_DIR)/bench-windows
+	python3 bench/run_windows.py --executable $(BUILD_DIR)/bench-windows

@@ -179,7 +179,13 @@ typedef struct {
     uint16_t *low,*high;
     size_t capacity,stride;
 } InwardDP;
+typedef struct {
+    InwardDP left,right;
+    size_t anchor;
+} DeletionWindowCache;
 struct SubseqHash3DeletionWorkspace {
+    DeletionWindowCache *window_cache;
+    size_t window_start,window_slots;
     size_t n,k,e,d,stride,score_capacity,parent_capacity,rolling_capacity;
     SideDP left,right;
     int64_t *rolling;
@@ -825,14 +831,44 @@ static void inward_trace_compact(const uint8_t *s,size_t n,size_t e,size_t d,
 static void trace(const SubseqHash3DeletionWorkspace *,const uint8_t *,
     const SubseqHash3DeletionSide *,const SideDP *,size_t,size_t,size_t,size_t,int,int,size_t,
     SubseqHash3DeletionResult *);
+/* Recover an outward witness from the full prefix scores of one cached
+   global anchor. Equal scores prefer deletion, matching the parent kernel. */
+static void trace_window_side(const uint8_t *s,size_t e,size_t d,
+    const SubseqHash3DeletionSide *t,const InwardDP *dp,size_t anchor,
+    size_t pivot,size_t l,size_t h,size_t residue,int high,int left,
+    SubseqHash3DeletionResult *out) {
+    size_t j=l-h;
+    while (j) {
+        const size_t r=left?residue:(residue?d-residue:0);
+        const uint16_t *scores=high?dp->high:dp->low;
+        if (h && scores[inward_state(dp,l,h,e)+r]==
+                scores[inward_state(dp,l-1,h-1,e)+r]) { --l; --h; continue; }
+        const size_t pos=left?anchor-l:anchor+l,dst=left?pivot-j:pivot+j;
+        const size_t row=4*(j-1)+s[pos];
+        out->seed[dst]=s[pos]; out->positions[dst]=pos;
+        if (t->B1[row*d+residue]<0) high=!high;
+        residue=submod(residue,t->C[row],d); --j; --l;
+    }
+}
+
+static const uint16_t *window_scores(const SubseqHash3DeletionWorkspace *w,
+    size_t i,size_t h,int left,int outward,int high) {
+    const InwardDP *dp=left?&w->inward_left:&w->inward_right;
+    size_t l=left || outward?i:w->n-i-1;
+    if (w->window_cache) {
+        const DeletionWindowCache *c=w->window_cache+(w->window_start+i)%w->window_slots;
+        dp=left?&c->left:&c->right; l=left?i:w->n-i-1;
+    }
+    return (high?dp->high:dp->low)+inward_state(dp,l,h,w->e);
+}
+
 static int compute_compact_seeds(const uint8_t *s,const SubseqHash3DeletionTables *t,
     const size_t *pivots,size_t count,SubseqHash3DeletionResult *out,
     SubseqHash3DeletionWorkspace *w,size_t maxleft,size_t maxright,int outward) {
     const size_t n=w->n,k=w->k,e=w->e,d=w->d;
-    InwardDP *left=&w->inward_left,*right=&w->inward_right;
     if (!outward) {
-        int status=build_inward(w,left,s,&t->left,maxleft,1);
-        if (!status) status=build_inward(w,right,s,&t->right,maxright,0);
+        int status=build_inward(w,&w->inward_left,s,&t->left,maxleft,1);
+        if (!status) status=build_inward(w,&w->inward_right,s,&t->right,maxright,0);
         if (status) return status;
     }
     for (size_t a=0;a<count;++a) {
@@ -844,8 +880,8 @@ static int compute_compact_seeds(const uint8_t *s,const SubseqHash3DeletionTable
             if (pass) bestpsi=d;
             for (size_t h=0;h<=e;++h) {
                 const size_t i=p+h,row=4*p+s[i];
-                const uint16_t *l=(t->left_sign[row]>0?left->high:left->low)+inward_state(left,i,h,e);
-                const uint16_t *r=(t->right_sign[row]>0?right->high:right->low)+inward_state(right,outward?i:n-i-1,e-h,e);
+                const uint16_t *l=window_scores(w,i,h,1,outward,t->left_sign[row]>0);
+                const uint16_t *r=window_scores(w,i,e-h,0,outward,t->right_sign[row]>0);
                 const size_t psi=pass?inward_first(w,l,r,t->pivot_C[row]):0;
                 if (psi>bestpsi || psi==d) continue;
                 const unsigned cost=inward_join(l,r,d,submod(t->pivot_C[row],psi,d));
@@ -859,8 +895,8 @@ static int compute_compact_seeds(const uint8_t *s,const SubseqHash3DeletionTable
         }
         if (best==-INF) goto failed;
         const size_t h=besti-p,row=4*p+s[besti];
-        const uint16_t *l=(t->left_sign[row]>0?left->high:left->low)+inward_state(left,besti,h,e);
-        const uint16_t *r=(t->right_sign[row]>0?right->high:right->low)+inward_state(right,outward?besti:n-besti-1,e-h,e);
+        const uint16_t *l=window_scores(w,besti,h,1,outward,t->left_sign[row]>0);
+        const uint16_t *r=window_scores(w,besti,e-h,0,outward,t->right_sign[row]>0);
         for (bestq=0;bestq<d;++bestq) {
             const size_t lr=submod(submod(bestpsi,t->pivot_C[row],d),bestq,d),rr=bestq?d-bestq:0;
             if ((unsigned)l[lr]+r[rr]==bestside) break;
@@ -870,14 +906,20 @@ static int compute_compact_seeds(const uint8_t *s,const SubseqHash3DeletionTable
         out[a].seed=malloc(k); out[a].positions=malloc(k*sizeof(size_t));
         if (!out[a].seed || !out[a].positions) goto failed;
         out[a].seed[p]=s[besti]; out[a].positions[p]=besti;
-        if (outward) {
+        if (outward && w->window_cache) {
+            DeletionWindowCache *c=w->window_cache+(w->window_start+besti)%w->window_slots;
+            trace_window_side(s,e,d,&t->left,&c->left,besti,p,besti,h,
+                submod(submod(bestpsi,t->pivot_C[row],d),bestq,d),t->left_sign[row]>0,1,out+a);
+            trace_window_side(s,e,d,&t->right,&c->right,besti,p,n-besti-1,e-h,
+                bestq,t->right_sign[row]>0,0,out+a);
+        } else if (outward) {
             trace(w,s,&t->left,&w->left,besti,p,h,
                 submod(submod(bestpsi,t->pivot_C[row],d),bestq,d),t->left_sign[row]>0,1,p,out+a);
             trace(w,s,&t->right,&w->right,besti,k-p-1,e-h,bestq,t->right_sign[row]>0,0,p,out+a);
         } else {
-        inward_trace_compact(s,n,e,d,&t->left,left,besti,h,
+        inward_trace_compact(s,n,e,d,&t->left,&w->inward_left,besti,h,
             submod(submod(bestpsi,t->pivot_C[row],d),bestq,d),t->left_sign[row]>0,1,out+a);
-        inward_trace_compact(s,n,e,d,&t->right,right,n-besti-1,e-h,bestq,t->right_sign[row]>0,0,out+a);
+        inward_trace_compact(s,n,e,d,&t->right,&w->inward_right,n-besti-1,e-h,bestq,t->right_sign[row]>0,0,out+a);
         }
     }
     return 0;
@@ -1178,4 +1220,70 @@ int subseqhash3_compute_deletion_seeds(const uint8_t *s,size_t n,size_t e,
     if (!w) return -1;
     status=subseqhash3_compute_deletion_seeds_with_workspace(s,n,e,t,pivots,count,out,w);
     subseqhash3_deletion_workspace_destroy(w); return status;
+}
+
+int subseqhash3_seed_deletion_windows(const uint8_t *s,size_t length,size_t n,
+    size_t e,const SubseqHash3DeletionTables *t,size_t count,
+    SubseqHash3Traversal traversal,SubseqHash3DeletionWindowCallback callback,
+    void *context) {
+    SubseqHash3DeletionWorkspace *w=NULL;
+    SubseqHash3DeletionResult *out=NULL;
+    DeletionWindowCache *cache=NULL;
+    size_t slots=0;
+    int status=-1,shared=0;
+    if (!s || !t || !callback || !n || n>256 || length<n || e>=n ||
+        !count || count>n-e ||
+        (traversal!=SUBSEQHASH3_OUTWARD && traversal!=SUBSEQHASH3_INWARD)) return -1;
+    for (size_t j=0;j<length;++j) if (s[j]>3) return -1;
+    w=subseqhash3_deletion_workspace_create(); out=calloc(count,sizeof(*out));
+    if (!w || !out) goto done;
+    /* Validate with the existing solver, retaining all supported wide-table
+       and direct-solver fallbacks. Do not emit anything for invalid tables. */
+    if (compute_deletion_seeds(s,n,e,t,NULL,count,out,w,traversal==SUBSEQHASH3_INWARD)) goto done;
+    if (callback(0,out,count,context)) goto done;
+    subseqhash3_deletion_results_destroy(out,count);
+    if (length==n) { status=0; goto done; }
+    shared=traversal==SUBSEQHASH3_OUTWARD && e && n-e>1 &&
+        !(e==1 && t->d>=128 && t->d>=8*n);
+    if (shared) {
+        /* Wide magnitudes keep the exact int64 single-window path. */
+        const size_t maximum=n-e-1;
+        for (size_t j=0;j<4*maximum*t->d;++j)
+            if (t->left.A[j]<-127 || t->left.A[j]>127 ||
+                t->right.A[j]<-127 || t->right.A[j]>127) { shared=0; break; }
+    }
+    if (shared) {
+        slots=count+e; cache=calloc(slots,sizeof(*cache));
+        if (!cache) goto done;
+        for (size_t j=0;j<slots;++j) cache[j].anchor=SIZE_MAX;
+        w->window_cache=cache; w->window_slots=slots;
+    }
+    for (size_t start=1;start<=length-n;++start) {
+        if (shared) {
+            w->window_start=start;
+            for (size_t i=0;i<slots;++i) {
+                const size_t anchor=start+i;
+                DeletionWindowCache *c=cache+anchor%slots;
+                if (c->anchor!=anchor) {
+                    uint8_t input[256]={0};
+                    for (size_t l=1;l<n && l<=anchor;++l) input[l-1]=s[anchor-l];
+                    if (build_inward(w,&c->left,input,&t->left,count-1,1)) goto done;
+                    memset(input,0,n);
+                    for (size_t l=1;l<n && l<length-anchor;++l) input[n-l]=s[anchor+l];
+                    if (build_inward(w,&c->right,input,&t->right,n-e-1,0)) goto done;
+                    c->anchor=anchor;
+                }
+            }
+            if (compute_compact_seeds(s+start,t,NULL,count,out,w,0,0,1)) goto done;
+        } else if (compute_deletion_seeds(s+start,n,e,t,NULL,count,out,w,
+                traversal==SUBSEQHASH3_INWARD)) goto done;
+        if (callback(start,out,count,context)) goto done;
+        subseqhash3_deletion_results_destroy(out,count);
+    }
+    status=0;
+done:
+    if (cache) for (size_t j=0;j<slots;++j) { free(cache[j].left.low); free(cache[j].right.low); }
+    free(cache); subseqhash3_deletion_results_destroy(out,out?count:0); free(out);
+    subseqhash3_deletion_workspace_destroy(w);
+    return status;
 }

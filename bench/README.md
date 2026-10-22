@@ -166,3 +166,8 @@ before/after timings for all four paths, including the exact single-deletion
 fast path and the remaining gap to 5x on E=4/8 workloads. Reproduce the
 comparison with `make bench-traversal-speed`; verify exact baseline parity
 with `make check-traversal-speed`.
+
+The [long-sequence sliding-window comparison](WINDOWS.md) measures inward
+against outward with anchor DPs shared across overlapping windows, plus the
+previous independent-window loop. Run `make bench-windows` for the sweep;
+`make check-windows` checks exact scores and witnesses for the window APIs.
