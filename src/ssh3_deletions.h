@@ -62,6 +62,16 @@ int subseqhash3_compute_deletion_seeds_with_workspace(const uint8_t *,size_t n,
 int subseqhash3_compute_deletion_seeds(const uint8_t *,size_t n,size_t deletions,
     const SubseqHash3DeletionTables *,const size_t *pivots,size_t count,
     SubseqHash3DeletionResult *);
+/* Alternative hash family: normal left prefix, reversed right suffix.
+   Same minimization, dimensions, pivot and workspace rules as above, but
+   scores and seeds differ from the outward SubseqHash2 order. All pivots
+   share two side DPs. Wide imported table scores remain exact. */
+int subseqhash3_compute_inward_deletion_seeds_with_workspace(const uint8_t *,size_t n,
+    size_t deletions,const SubseqHash3DeletionTables *,const size_t *pivots,
+    size_t count,SubseqHash3DeletionResult *,SubseqHash3DeletionWorkspace *);
+int subseqhash3_compute_inward_deletion_seeds(const uint8_t *,size_t n,size_t deletions,
+    const SubseqHash3DeletionTables *,const size_t *pivots,size_t count,
+    SubseqHash3DeletionResult *);
 #ifdef __cplusplus
 }
 #endif

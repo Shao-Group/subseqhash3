@@ -103,3 +103,66 @@ Example run on 2026-10-20 (microseconds per call, median of three samples):
 | 50 | 8 | 32 | 7.421 | 36.110 | 4.87x |
 | 50 | 8 | 256 | 51.884 | 191.337 | 3.69x |
 | 50 | 8 | 1025 | 248.854 | 2041.571 | 8.20x |
+
+# Deletion kernel versus its previous version and repeats
+
+```sh
+make BUILD_DIR=build/del-fast \
+  CFLAGS='-O3 -std=c99 -Wall -Wextra -Wpedantic -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512' \
+  test bench-deletions-speed
+```
+
+`check-deletions-speed` runs only the exact comparisons. No external
+SubseqHash2 checkout is required. The benchmark checks 160 random windows
+against the immutable `fab085f` deletion kernel, including exact seeds and
+positions. Timings use 16 inputs, three passes per sample, five samples,
+rotating execution order, and the median. Both deletion implementations
+use identical flags, tables, inputs, pivot counts, and reusable workspaces.
+Timing includes result allocation, traceback, and cleanup; table creation
+is excluded.
+
+Shared pivot tables with side magnitudes at most 127 use 16-bit minimum
+costs `127*j + omega` and `127*j - omega`. The AVX-512 kernel updates 32
+residues per vector with unsigned saturating addition. It packs table scores
+once per side per call, handles the zero-deletion and single-retained-base
+states sparsely, and limits each anchor to deletion budgets needed by the
+requested pivots. Tables with larger magnitudes retain exact 64-bit scores.
+Table magnitudes are checked on every call, so workspace reuse also works
+when switching tables or changing their values.
+
+The repeats columns below are context, not an equivalence check: repeats
+uses the inward C API for one deletion and E substitutions; deletions uses
+the outward C API for E deletions. Both CLI commands now default to outward
+and accept `--inward` to select the inward family. The inward
+order shares side DPs across pivots. The outward order needs separate side
+DPs at each input pivot, so these optimizations do not make deletion timing
+match repeats. Changing traversal would change the hash order and outputs.
+
+Measured on 2026-10-21, Xeon Gold 6148, single thread, flags above
+(microseconds per call; full results in `deletions-speed-results.csv`):
+
+| n | E deletions | D | Seeds | Previous | Optimized | Speedup | Repeats |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 30 | 4 | 1024 | 10 | 1761.755 | 651.749 | 2.70x | 143.742 |
+| 30 | 4 | 1024 | 26 | 3849.156 | 1417.835 | 2.71x | 283.378 |
+| 50 | 8 | 1024 | 10 | 6276.738 | 1688.124 | 3.72x | 342.306 |
+| 50 | 8 | 1024 | 42 | 18363.545 | 6126.527 | 3.00x | 848.207 |
+
+For the alternative inward deletion family, see the [implementation, runtime
+and paired collision experiment](DELETIONS_INWARD.md).
+
+For outward repeats with one deletion and E substitutions, see the
+[implementation, runtime and paired collision experiment](REPEATS_OUTWARD.md).
+
+The [repeats residue sweep](REPEATS_RESIDUES.md) compares runtime and
+seed-collision probabilities at D=32, 128, 1024 and 2048.
+
+The [matched-runtime traversal comparison](TRAVERSAL_MATCHED.md) adjusts D
+separately for inward and outward at fixed seed count, for both deletions
+and repeats.
+
+The [single-thread traversal optimization](TRAVERSAL_OPTIMIZATION.md) records
+before/after timings for all four paths, including the exact single-deletion
+fast path and the remaining gap to 5x on E=4/8 workloads. Reproduce the
+comparison with `make bench-traversal-speed`; verify exact baseline parity
+with `make check-traversal-speed`.

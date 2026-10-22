@@ -31,8 +31,9 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 $(PROGRAM): $(OBJECTS)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(PROGRAM) $(BUILD_DIR)/check-repeats $(BUILD_DIR)/check-deletions
+test: $(PROGRAM) $(BUILD_DIR)/check-repeats $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-pivots
 	$(PROGRAM) test
+	$(BUILD_DIR)/bench-pivots --check-only
 	$(BUILD_DIR)/check-deletions 2>$(BUILD_DIR)/deletions-test.log || { cat $(BUILD_DIR)/deletions-test.log >&2; exit 1; }
 	$(BUILD_DIR)/check-repeats 2>$(BUILD_DIR)/repeats-test.log || { cat $(BUILD_DIR)/repeats-test.log >&2; exit 1; }
 
@@ -108,11 +109,11 @@ simd: clean-simd
 		CFLAGS="$(CFLAGS) $(SIMD_CFLAGS)" all
 
 clean-simd:
-	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single $(SIMD_BUILD_DIR)/check-repeats $(SIMD_BUILD_DIR)/repeats-test.log $(SIMD_BUILD_DIR)/check-deletions $(SIMD_BUILD_DIR)/bench-deletions $(SIMD_BUILD_DIR)/deletions-test.log
+	rm -f $(SIMD_BUILD_DIR)/*.o $(SIMD_BUILD_DIR)/*.d $(SIMD_BUILD_DIR)/subseqhash3 $(SIMD_BUILD_DIR)/bench-one $(SIMD_BUILD_DIR)/bench-pivots $(SIMD_BUILD_DIR)/bench-pivots-speed $(SIMD_BUILD_DIR)/bench-pivots-single $(SIMD_BUILD_DIR)/check-repeats $(SIMD_BUILD_DIR)/repeats-test.log $(SIMD_BUILD_DIR)/check-deletions $(SIMD_BUILD_DIR)/bench-deletions $(SIMD_BUILD_DIR)/deletions-test.log $(SIMD_BUILD_DIR)/bench-deletions-speed $(SIMD_BUILD_DIR)/bench-deletions-traversal $(SIMD_BUILD_DIR)/bench-repeats-traversal $(SIMD_BUILD_DIR)/bench-traversal-speed $(SIMD_BUILD_DIR)/bench-traversal-matched
 	rmdir $(SIMD_BUILD_DIR) 2>/dev/null || true
 
 clean: clean-simd
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single $(BUILD_DIR)/check-repeats $(BUILD_DIR)/repeats-test.log $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-deletions $(BUILD_DIR)/deletions-test.log
+	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(PROGRAM) $(BUILD_DIR)/bench-one $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/bench-pivots-speed $(BUILD_DIR)/bench-pivots-single $(BUILD_DIR)/check-repeats $(BUILD_DIR)/repeats-test.log $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-deletions $(BUILD_DIR)/deletions-test.log $(BUILD_DIR)/bench-deletions-speed $(BUILD_DIR)/bench-deletions-traversal $(BUILD_DIR)/bench-repeats-traversal $(BUILD_DIR)/bench-traversal-speed $(BUILD_DIR)/bench-traversal-matched
 	rmdir $(BUILD_DIR) 2>/dev/null || true
 
 -include $(DEPS)
@@ -137,3 +138,69 @@ bench-deletions: $(BUILD_DIR)/bench-deletions
 
 check-deletions-reference: $(BUILD_DIR)/bench-deletions
 	$(BUILD_DIR)/bench-deletions --check-only
+
+# Immutable deletion kernel before compact-cost optimization, same flags.
+DELETION_BASELINE_RENAMES := \
+  -Dsubseqhash3_deletion_tables_init=baseline_deletion_tables_init \
+  -Dsubseqhash3_deletion_tables_from_pivots=baseline_deletion_tables_from_pivots \
+  -Dsubseqhash3_deletion_tables_import=baseline_deletion_tables_import \
+  -Dsubseqhash3_deletion_tables_destroy=baseline_deletion_tables_destroy \
+  -Dsubseqhash3_deletion_workspace_create=baseline_deletion_workspace_create \
+  -Dsubseqhash3_deletion_workspace_destroy=baseline_deletion_workspace_destroy \
+  -Dsubseqhash3_deletion_results_destroy=baseline_deletion_results_destroy \
+  -Dsubseqhash3_compute_deletion_seeds_with_workspace=baseline_compute_deletion_seeds_with_workspace \
+  -Dsubseqhash3_compute_deletion_seeds=baseline_compute_deletion_seeds
+$(BUILD_DIR)/deletions-baseline.o: bench/reference/deletions_round1.c src/ssh3_deletions.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DELETION_BASELINE_RENAMES) -c $< -o $@
+
+$(BUILD_DIR)/bench-deletions-speed: bench/deletions_speed.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/deletions-baseline.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+.PHONY: bench-deletions-speed check-deletions-speed
+bench-deletions-speed: $(BUILD_DIR)/bench-deletions-speed
+	$(BUILD_DIR)/bench-deletions-speed
+check-deletions-speed: $(BUILD_DIR)/bench-deletions-speed
+	$(BUILD_DIR)/bench-deletions-speed --check-only
+
+$(BUILD_DIR)/bench-deletions-traversal: bench/deletions_traversal.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+.PHONY: bench-deletions-traversal
+bench-deletions-traversal: $(BUILD_DIR)/bench-deletions-traversal
+	$(BUILD_DIR)/bench-deletions-traversal --runtime
+
+$(BUILD_DIR)/bench-repeats-traversal: bench/repeats_traversal.c $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+.PHONY: bench-repeats-traversal
+bench-repeats-traversal: $(BUILD_DIR)/bench-repeats-traversal
+	$(BUILD_DIR)/bench-repeats-traversal --runtime
+
+REPEATS_SWEEP_JOBS ?= 8
+.PHONY: bench-traversal-matched
+$(BUILD_DIR)/bench-traversal-matched: bench/traversal_matched.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+bench-traversal-matched: $(BUILD_DIR)/bench-traversal-matched
+	python3 bench/run_traversal_matched.py --executable $(BUILD_DIR)/bench-traversal-matched --jobs $(REPEATS_SWEEP_JOBS)
+
+.PHONY: bench-repeats-residues
+bench-repeats-residues: $(BUILD_DIR)/bench-repeats-traversal
+	python3 bench/run_repeats_residue_sweep.py --executable $(BUILD_DIR)/bench-repeats-traversal --jobs $(REPEATS_SWEEP_JOBS) --parts-dir $(BUILD_DIR)/repeats-residue-parts
+
+$(BUILD_DIR)/traversal-reference-deletions.o: bench/reference/traversal_deletions.c bench/reference/traversal_rename.h src/ssh3_deletions.h src/ssh3_pivots.h src/subseqhash3.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -include bench/reference/traversal_rename.h -c $< -o $@
+
+$(BUILD_DIR)/traversal-reference-pivots.o: bench/reference/traversal_pivots.c bench/reference/traversal_rename.h src/ssh3_pivots.h src/subseqhash3.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -include bench/reference/traversal_rename.h -c $< -o $@
+
+$(BUILD_DIR)/bench-traversal-speed: bench/traversal_speed.c $(BUILD_DIR)/traversal-reference-deletions.o $(BUILD_DIR)/traversal-reference-pivots.o $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+.PHONY: bench-traversal-speed check-traversal-speed
+bench-traversal-speed: $(BUILD_DIR)/bench-traversal-speed
+	$(BUILD_DIR)/bench-traversal-speed
+	$(BUILD_DIR)/bench-traversal-speed --single
+
+check-traversal-speed: $(BUILD_DIR)/bench-traversal-speed
+	$(BUILD_DIR)/bench-traversal-speed --check-only

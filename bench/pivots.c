@@ -10,6 +10,11 @@
 #include <string.h>
 #include <time.h>
 
+static int outward;
+#define COMPUTE_SEEDS (outward?subseqhash3_compute_outward_pivot_seeds:subseqhash3_compute_pivot_seeds)
+#define COMPUTE_REPEATS (outward?subseqhash3_compute_outward_pivot_repeats:subseqhash3_compute_pivot_repeats)
+#define COMPUTE_WORKSPACE (outward?subseqhash3_compute_outward_pivot_repeats_with_workspace:subseqhash3_compute_pivot_repeats_with_workspace)
+
 static uint64_t random_state=UINT64_C(123456789);
 static unsigned random_base(void) {
     random_state^=random_state<<13; random_state^=random_state>>7;
@@ -25,14 +30,14 @@ static void evaluate(const uint8_t *seed,size_t k,size_t pivot,
     int lo=0,ro=0;
     const size_t pt=4*pivot+seed[pivot];
     for (i=0;i<pivot;++i) {
-        const unsigned a=seed[i];
+        const unsigned a=seed[outward?pivot-1-i:i];
         size_t at;
         lr=(lr+t->left.C[4*i+a])%t->d;
         at=(4*i+a)*t->d+lr;
         lo=t->left.B1[at]*lo+t->left.A[at]*t->left.B2[at];
     }
     for (i=0;i<k-pivot-1;++i) {
-        const unsigned a=seed[k-1-i];
+        const unsigned a=seed[outward?pivot+1+i:k-1-i];
         size_t at;
         rr=(rr+t->right.C[4*i+a])%t->d;
         at=(4*i+a)*t->d+rr;
@@ -113,8 +118,8 @@ static void correctness(void) {
         size_t i;
         for (i=0;i<n;++i) s[i]=(uint8_t)(trial%4?random_base():0);
         assert(!subseqhash3_pivot_tables_init(&tables,n,d,12345+trial));
-        assert(!subseqhash3_compute_pivot_seeds(s,n,edits,&tables,NULL,k,out));
-        assert(!subseqhash3_compute_pivot_repeats_with_workspace(
+        assert(!COMPUTE_SEEDS(s,n,edits,&tables,NULL,k,out));
+        assert(!COMPUTE_WORKSPACE(
             s,n,edits,&tables,1,k,reused,workspace));
         for (p=0;p<k;++p) same(out+p,reused+p);
         subseqhash3_edit_results_destroy(reused,k);
@@ -125,7 +130,7 @@ static void correctness(void) {
             SubseqHash3EditResult single={0};
             validate(s,n,edits,p,&tables,out+p);
             assert(out[p].psi==b.psi[p] && out[p].omega==b.omega[p]);
-            assert(!subseqhash3_compute_pivot_seeds(s,n,edits,&tables,&p,1,&single));
+            assert(!COMPUTE_SEEDS(s,n,edits,&tables,&p,1,&single));
             same(out+p,&single);
             subseqhash3_edit_results_destroy(&single,1);
         }
@@ -140,7 +145,7 @@ static void correctness(void) {
         size_t i;
         for (i=0;i<n;++i) s[i]=(uint8_t)random_base();
         assert(!subseqhash3_pivot_tables_init(&tables,n,ds[trial%10],54321+trial));
-        assert(!subseqhash3_compute_pivot_seeds(s,n,edits,&tables,NULL,k,out));
+        assert(!COMPUTE_SEEDS(s,n,edits,&tables,NULL,k,out));
         for (p=0;p<k;++p) validate(s,n,edits,p,&tables,out+p);
         subseqhash3_edit_results_destroy(out,k);
         subseqhash3_pivot_tables_destroy(&tables);
@@ -152,32 +157,41 @@ static void correctness(void) {
         size_t i;
         for (i=0;i<3;++i)
             assert(!subseqhash3_pivot_tables_init(tables+i,5,31,100+i));
-        assert(!subseqhash3_compute_pivot_repeats(s,5,2,tables,3,10,out));
+        assert(!COMPUTE_REPEATS(s,5,2,tables,3,10,out));
         for (i=0;i<10;++i) {
             size_t pivot=i%4;
-            assert(!subseqhash3_compute_pivot_seeds(s,5,2,tables+i/4,&pivot,1,&single));
+            assert(!COMPUTE_SEEDS(s,5,2,tables+i/4,&pivot,1,&single));
             same(out+i,&single);
             subseqhash3_edit_results_destroy(&single,1);
         }
         subseqhash3_edit_results_destroy(out,10);
-        assert(!subseqhash3_compute_pivot_repeats_with_workspace(
+        assert(!COMPUTE_WORKSPACE(
             s,5,2,tables,3,10,out,workspace));
         for (i=0;i<10;++i) validate(s,5,2,i%4,tables+i/4,out+i);
         subseqhash3_edit_results_destroy(out,10);
-        assert(subseqhash3_compute_pivot_repeats(s,5,2,tables,2,10,out)==-1);
-        assert(subseqhash3_compute_pivot_seeds(s,5,5,tables,NULL,1,out)==-1);
-        assert(subseqhash3_compute_pivot_seeds(s,1,0,tables,NULL,1,out)==-1);
-        assert(subseqhash3_compute_pivot_seeds(s,5,2,tables,NULL,5,out)==-1);
+        {
+            const size_t pivots[]={3,0,3,1};
+            assert(!COMPUTE_SEEDS(s,5,2,tables,pivots,4,out));
+            for (i=0;i<4;++i) {
+                assert(!COMPUTE_SEEDS(s,5,2,tables,pivots+i,1,&single));
+                same(out+i,&single); subseqhash3_edit_results_destroy(&single,1);
+            }
+            subseqhash3_edit_results_destroy(out,4);
+        }
+        assert(COMPUTE_REPEATS(s,5,2,tables,2,10,out)==-1);
+        assert(COMPUTE_SEEDS(s,5,5,tables,NULL,1,out)==-1);
+        assert(COMPUTE_SEEDS(s,1,0,tables,NULL,1,out)==-1);
+        assert(COMPUTE_SEEDS(s,5,2,tables,NULL,5,out)==-1);
         i=4;
-        assert(subseqhash3_compute_pivot_seeds(s,5,2,tables,&i,1,out)==-1);
+        assert(COMPUTE_SEEDS(s,5,2,tables,&i,1,out)==-1);
         {
             const uint8_t bad[]={0,4,1,2,3};
-            assert(subseqhash3_compute_pivot_seeds(bad,5,2,tables,NULL,1,out)==-1);
-            assert(subseqhash3_compute_pivot_seeds(NULL,5,2,tables,NULL,1,out)==-1);
-            assert(subseqhash3_compute_pivot_seeds(s,5,2,NULL,NULL,1,out)==-1);
-            assert(subseqhash3_compute_pivot_seeds(s,5,2,tables,NULL,1,NULL)==-1);
+            assert(COMPUTE_SEEDS(bad,5,2,tables,NULL,1,out)==-1);
+            assert(COMPUTE_SEEDS(NULL,5,2,tables,NULL,1,out)==-1);
+            assert(COMPUTE_SEEDS(s,5,2,NULL,NULL,1,out)==-1);
+            assert(COMPUTE_SEEDS(s,5,2,tables,NULL,1,NULL)==-1);
             tables[1].k=1;
-            assert(subseqhash3_compute_pivot_repeats_with_workspace(
+            assert(COMPUTE_WORKSPACE(
                 s,5,2,tables,3,10,out,workspace)==-1);
             for (i=0;i<10;++i) assert(!out[i].seed && !out[i].positions);
             tables[1].k=4;
@@ -208,13 +222,13 @@ static void correctness(void) {
                 t.right_reversed_A[i]=(int8_t)(sign*127);
             }
             memset(t.pivot_A,sign*127,t.k*4);
-            assert(!subseqhash3_compute_pivot_seeds(s,257,1,&t,pivots,3,out));
+            assert(!COMPUTE_SEEDS(s,257,1,&t,pivots,3,out));
             for (i=0;i<3;++i) {
                 validate(s,257,1,pivots[i],&t,out+i);
                 assert(out[i].psi==0 && out[i].omega==sign*32512.0);
             }
             subseqhash3_edit_results_destroy(out,3);
-            assert(!subseqhash3_compute_pivot_repeats_with_workspace(
+            assert(!COMPUTE_WORKSPACE(
                 s,5,4,&t,1,3,out,workspace));
             for (i=0;i<3;++i) validate(s,5,4,i,&t,out+i);
             subseqhash3_edit_results_destroy(out,3);
@@ -222,7 +236,7 @@ static void correctness(void) {
         subseqhash3_pivot_tables_destroy(&t);
     }
     subseqhash3_pivot_workspace_destroy(workspace);
-    puts("pivot checks: 140 exhaustive neighborhoods, 30 larger witnesses, score limits, workspace and repeat batching passed");
+    printf("%s pivot checks: 140 exhaustive neighborhoods, 30 larger witnesses, score limits, workspace and repeat batching passed\n",outward?"outward":"inward");
 }
 
 static double seconds(void) {
@@ -250,14 +264,14 @@ static double measure(const uint8_t *inputs,size_t n,size_t edits,size_t r,
         const uint8_t *s=inputs+((i?i-1:0)%input_count)*n;
         if (i==1) start=seconds();
         if (method==3) {
-            assert(!subseqhash3_compute_pivot_repeats_with_workspace(
+            assert(!COMPUTE_WORKSPACE(
                 s,n,edits,tables,families,r,out,workspace));
         } else if (!method) {
-            assert(!subseqhash3_compute_pivot_repeats(s,n,edits,tables,families,r,out));
+            assert(!COMPUTE_REPEATS(s,n,edits,tables,families,r,out));
         } else for (j=0;j<r;++j) {
             if (method==1) {
                 const size_t pivot=j%(n-1);
-                assert(!subseqhash3_compute_pivot_seeds(s,n,edits,tables+j/(n-1),&pivot,1,out+j));
+                assert(!COMPUTE_SEEDS(s,n,edits,tables+j/(n-1),&pivot,1,out+j));
             } else {
                 /* Earlier API: ONE substitution and E deletions. Different
                    neighborhood; this is only the requested timing baseline. */
@@ -294,7 +308,11 @@ int main(int argc,char **argv) {
         fputs("usage: bench-pivots [--check-only | --r10]\n",stderr);
         return EXIT_FAILURE;
     }
-    correctness();
+    for (outward=0;outward<2;++outward) {
+        random_state=UINT64_C(123456789);
+        correctness();
+    }
+    outward=0;
     if (argc==2 && !strcmp(argv[1],"--check-only")) return 0;
     printf("# inputs=%zu, loops=%zu, samples=%zu, untimed_warmup=1\n",
            input_count,loops,rounds);

@@ -41,6 +41,20 @@ argument to generate tables automatically in `seeds.csv.piv`:
 build/simd/subseqhash3 repeats input.seq 30 5 1024 10 seeds.csv
 ```
 
+Both `repeats` and `deletions` use outward traversal by default, reading both
+sides away from the pivot. Add `--inward` to use the alternative inward hash
+order with different scores and seeds:
+
+```sh
+build/simd/subseqhash3 repeats input.seq 30 5 1024 10 inward.csv tables.piv --inward
+```
+
+Repeats also accepts `--outward` for compatibility. To reproduce CSV output
+from the previous inward default, add `--inward` and reuse the same tables.
+The C API functions retain their existing traversal semantics.
+
+See the [outward repeats runtime and collision comparison](bench/REPEATS_OUTWARD.md).
+
 The default `tables` command still produces legacy files for `seeds` and
 `collisions`. These lack pivot parameters and cannot be used with `repeats`;
 use `--pivots` for the new format. In pivot mode, R means seed repetitions,
@@ -61,13 +75,23 @@ build/subseqhash3 deletions input.seq 30 5 11 10 deletions.csv shared.piv
 k=W-E seeds. Shared tables need n-1>=k and matching D; only the first family
 is used. For zero deletions, generate n>=W+1. Without a table argument,
 `deletions` creates `OUTPUT.piv`; `--seed 42` makes creation reproducible.
+Add `--inward` to use shared prefix/suffix DPs with an alternative hash order:
+
+```sh
+build/simd/subseqhash3 deletions input.seq 30 5 11 10 inward.csv shared.piv --inward
+```
+
+The default remains the outward SubseqHash2 order. Inward traversal changes
+scores and selected seeds; it accepts the same tables and deletion budgets.
+See the [runtime and collision comparison](bench/DELETIONS_INWARD.md).
+
 Original SubseqHash2 text tables remain available through
 `--subseqhash2-tables FILE`.
 
-Use `make simd` and `build/simd/subseqhash3` for acceleration. This path
-preserves the original SubseqHash2 side directions and exact 64-bit arithmetic,
-while widening the shared small-magnitude parameters without loss. The
-mixed-edit algorithms keep their existing behavior.
+Use `make simd` and `build/simd/subseqhash3` for acceleration. The default path
+preserves the original SubseqHash2 side directions. Both traversals use compact
+costs for small table magnitudes and exact 64-bit arithmetic for wide tables. The
+mixed-edit C APIs keep their existing behavior.
 See [algorithm, API, correctness, and measured speedups](bench/DELETIONS.md).
 
 ## Added APIs
@@ -76,8 +100,10 @@ See [algorithm, API, correctness, and measured speedups](bench/DELETIONS.md).
 |---|---:|---:|---|
 | `subseqhash3_compute_one_substitution()` | 1 | E | One seed of length n-E |
 | `subseqhash3_compute_pivot_seeds()` | E | 1 | Up to k=n-1 pivot orders per family |
-| `subseqhash3_compute_pivot_repeats()` | E | 1 | Any positive r, batching independent families |
+| `subseqhash3_compute_pivot_repeats()` | E | 1 | Any positive r, batching independent inward families |
+| `subseqhash3_compute_outward_pivot_repeats()` | E | 1 | Any positive r, batching independent outward families (CLI default) |
 | `subseqhash3_compute_deletion_seeds()` | 0 | E | Up to k=n-E original SubseqHash2 pivot orders |
+| `subseqhash3_compute_inward_deletion_seeds()` | 0 | E | Up to k=n-E inward pivot orders |
 
 The single-seed API in `src/subseqhash3.h` uses a reduced DP with two
 substitution planes. Its SIMD path uses nonnegative cost scores, retained
@@ -153,3 +179,11 @@ separate calls to the same pivot orders as a same-problem reference.
 The pivot construction is inspired by Xiang Li, Ke Chen, and Mingfu Shao,
 *Efficient seeding for error-prone sequences with SubseqHash2*,
 Bioinformatics 41(8), 2025, [doi:10.1093/bioinformatics/btaf418](https://doi.org/10.1093/bioinformatics/btaf418).
+
+## Traversal optimization results
+
+All four traversal paths are optimized, with exact seed and witness parity
+against frozen references. At D=1024 and E=4/8, speedups are 1.31–1.77× for
+deletions and 1.03–1.09× for repeats; the general 5× target remains unmet.
+For one deletion and zero substitutions at D=1024, speedups are 9.89–43.55×.
+See the [full measurements, implementation and validation](bench/TRAVERSAL_OPTIMIZATION.md).

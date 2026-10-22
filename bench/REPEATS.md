@@ -21,6 +21,14 @@ exactly **one deletion and E substitutions of retained bases**, returning R
 seeds of length W-1 for each sliding window. This differs from `seeds`, whose
 E is a total edit budget and which emits all substitution/deletion splits.
 
+The default traversal is outward (reversed-left, normal-right). `--inward`
+selects normal-left, reversed-right traversal with the same tables and edit
+budget, changing scores and seeds. Use `--inward` with the same table file to
+reproduce output from the previous default. `--outward` remains a compatibility
+option; duplicate or conflicting traversal flags are rejected. The C API
+functions retain their existing traversal semantics.
+See the [implementation and measured runtime/collision comparison](REPEATS_OUTWARD.md).
+
 ## Build and run
 
 For an AVX-512F/BW/VL-capable CPU:
@@ -51,7 +59,7 @@ one base at a time, and all sequences use the same initialized table families.
 ## Command arguments
 
 ```text
-subseqhash3 repeats INPUT W E D R OUTPUT [TABLE_FILE]
+subseqhash3 repeats INPUT W E D R OUTPUT [TABLE_FILE] [--inward]
 subseqhash3 tables n D R OUTPUT --pivots [--seed SEED]
 ```
 

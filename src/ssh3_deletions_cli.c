@@ -10,9 +10,10 @@
 #include <time.h>
 
 static void help(FILE *f) {
-    fputs("Generate up to k=W-E deletion-only SubseqHash2 pivot seeds per window.\n\n"
+    fputs("Generate up to k=W-E deletion-only pivot seeds per window (outward by default).\n\n"
           "Usage:\n  subseqhash3 deletions INPUT W E D R OUTPUT [TABLE_FILE] [--seed SEED]\n"
-          "                       [--subseqhash2-tables TEXT_FILE]\n\n"
+          "                       [--subseqhash2-tables TEXT_FILE] [--inward]\n\n"
+          "  --inward    Use shared inward DPs (different hash order and seeds).\n"
           "  INPUT       DNA sequences, one per line, A/C/G/T in either case.\n"
           "  W           Window length, 1..256; windows advance one base.\n"
           "  E           Exactly E deletions, 0..W-1; no substitutions.\n"
@@ -44,7 +45,7 @@ int ssh3_deletions_main(int argc,char **argv) {
     const char *args[7],*original=NULL;
     uint64_t values[4],seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
     size_t w,e,d,r,seq=0,capacity=0,start,j,a;
-    int i,count=0,seed_set=0,status=EXIT_FAILURE;
+    int i,count=0,seed_set=0,inward=0,status=EXIT_FAILURE;
     FILE *in=NULL,*out=NULL;
     char *line=NULL,*generated=NULL;
     uint8_t *encoded=NULL;
@@ -56,7 +57,10 @@ int ssh3_deletions_main(int argc,char **argv) {
     struct timespec before,after;
     if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) { help(stdout); return 0; }
     for (i=1;i<argc;++i) {
-        if (!strcmp(argv[i],"--seed")) {
+        if (!strcmp(argv[i],"--inward")) {
+            if (inward) goto invalid;
+            inward=1;
+        } else if (!strcmp(argv[i],"--seed")) {
             if (seed_set || i+1>=argc || number(argv[++i],&seed)) goto invalid;
             seed_set=1;
         } else if (!strcmp(argv[i],"--subseqhash2-tables")) {
@@ -130,7 +134,8 @@ int ssh3_deletions_main(int argc,char **argv) {
             }
         }
         for (start=0;start<=length-w;++start) {
-            if (subseqhash3_compute_deletion_seeds_with_workspace(encoded+start,w,e,&tables,NULL,r,results,workspace)) goto done;
+            if ((inward?subseqhash3_compute_inward_deletion_seeds_with_workspace:
+                    subseqhash3_compute_deletion_seeds_with_workspace)(encoded+start,w,e,&tables,NULL,r,results,workspace)) goto done;
             for (a=0;a<r;++a) {
                 if (fprintf(out,"%zu,%zu,%zu,%zu,",a,seq,start,e)<0) goto done;
                 for (j=0;j<w-e;++j) if (fputc("ACGT"[results[a].seed[j]],out)==EOF) goto done;

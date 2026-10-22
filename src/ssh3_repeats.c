@@ -19,9 +19,11 @@ static int parse_size(const char *text,size_t *value) {
 }
 
 static void help(FILE *stream) {
-    fputs("Generate single-threaded pivot seeds: one deletion and E substitutions.\n\n"
-          "Usage:\n  subseqhash3 repeats INPUT W E D R OUTPUT [TABLE_FILE]\n\n"
+    fputs("Generate single-threaded pivot seeds: one deletion and E substitutions (outward by default).\n\n"
+          "Usage:\n  subseqhash3 repeats INPUT W E D R OUTPUT [TABLE_FILE] [--inward]\n\n"
           "Arguments:\n"
+          "  --inward    Read sides toward the pivot (different hash order and seeds).\n"
+          "  --outward   Explicitly select the default outward traversal.\n"
           "  INPUT       DNA sequences, one per line (A/C/G/T, either case).\n"
           "  W           Sliding-window length, 2..257.\n"
           "  E           Exactly E substitutions of retained bases, 0..W-1.\n"
@@ -55,7 +57,7 @@ static int write_result(FILE *out,size_t repeat,size_t k,size_t sequence,
 
 static int process_sequence(FILE *out,const char *line,size_t length,size_t index,
     size_t w,size_t e,size_t repeats,const SubseqHash3PivotTableFile *tables,
-    SubseqHash3PivotWorkspace *workspace,SubseqHash3EditResult *results) {
+    SubseqHash3PivotWorkspace *workspace,SubseqHash3EditResult *results,int outward) {
     uint8_t *encoded;
     size_t i,start;
     if (length<w) {
@@ -76,7 +78,8 @@ static int process_sequence(FILE *out,const char *line,size_t length,size_t inde
         }
     }
     for (start=0;start<=length-w;++start) {
-        if (subseqhash3_compute_pivot_repeats_with_workspace(encoded+start,w,e,
+        if ((outward?subseqhash3_compute_outward_pivot_repeats_with_workspace:
+                subseqhash3_compute_pivot_repeats_with_workspace)(encoded+start,w,e,
                 tables->tables,tables->count,repeats,results,workspace)) {
             fprintf(stderr,"pivot seeding failed for sequence %zu, window %zu\n",index,start);
             free(encoded); return -1;
@@ -102,7 +105,21 @@ int ssh3_repeats_main(int argc,char **argv) {
     SubseqHash3PivotWorkspace *workspace=NULL;
     SubseqHash3EditResult *results=NULL;
     struct timespec wall_start,wall_end,cpu_start,cpu_end;
-    int status=EXIT_FAILURE;
+    int status=EXIT_FAILURE,outward=1,traversal_set=0;
+    char *positional[8];
+    int positional_count=1;
+    positional[0]=argv[0];
+    for (int arg=1;arg<argc;++arg) {
+        if (!strcmp(argv[arg],"--inward") || !strcmp(argv[arg],"--outward")) {
+            if (traversal_set) { help(stderr); return EXIT_FAILURE; }
+            outward=!strcmp(argv[arg],"--outward");
+            traversal_set=1;
+        } else {
+            if (positional_count==8) { help(stderr); return EXIT_FAILURE; }
+            positional[positional_count++]=argv[arg];
+        }
+    }
+    argc=positional_count; argv=positional;
     if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) {
         help(stdout); return EXIT_SUCCESS;
     }
@@ -154,7 +171,7 @@ int ssh3_repeats_main(int argc,char **argv) {
         if (!length) {
             fprintf(stderr,"sequence %zu is empty\n",index); goto done;
         }
-        if (process_sequence(output,line,length,index,w,e,repeats,&tables,workspace,results))
+        if (process_sequence(output,line,length,index,w,e,repeats,&tables,workspace,results,outward))
             goto done;
         ++index;
     }

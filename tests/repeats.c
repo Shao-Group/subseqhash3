@@ -65,6 +65,8 @@ static void same_result(const SubseqHash3EditResult *a,const SubseqHash3EditResu
 static void round_trip(const char *path,size_t n,size_t d) {
     SubseqHash3PivotTables expected[3]={{0}};
     SubseqHash3PivotTableFile actual={0};
+    SubseqHash3PivotWorkspace *workspace=subseqhash3_pivot_workspace_create();
+    assert(workspace);
     const uint64_t seed=12345;
     size_t i,length;
     assert(!subseqhash3_pivot_table_file_create(path,n,d,3,seed));
@@ -85,9 +87,26 @@ static void round_trip(const char *path,size_t n,size_t d) {
         assert(!subseqhash3_compute_pivot_repeats(sequence,length,e,
             expected,3,repeats,b));
         for (i=0;i<repeats;++i) same_result(a+i,b+i);
+        subseqhash3_edit_results_destroy(b,repeats);
+        SubseqHash3EditResult c[16]={{0}};
+        assert(!subseqhash3_compute_outward_pivot_repeats_with_workspace(sequence,length,e,
+            actual.tables,3,repeats,b,workspace));
+        assert(!subseqhash3_compute_outward_pivot_repeats(sequence,length,e,
+            expected,3,repeats,c));
+        for (i=0;i<repeats;++i) same_result(b+i,c+i);
+        subseqhash3_edit_results_destroy(c,repeats);
+        assert(!subseqhash3_compute_pivot_repeats_with_workspace(sequence,length,e,
+            actual.tables,3,repeats,c,workspace));
+        for (i=0;i<repeats;++i) same_result(a+i,c+i);
+        subseqhash3_edit_results_destroy(c,repeats);
+        assert(!subseqhash3_compute_outward_pivot_repeats_with_workspace(sequence,length,e,
+            actual.tables,3,repeats,c,workspace));
+        for (i=0;i<repeats;++i) same_result(b+i,c+i);
         subseqhash3_edit_results_destroy(a,repeats);
         subseqhash3_edit_results_destroy(b,repeats);
+        subseqhash3_edit_results_destroy(c,repeats);
     }
+    subseqhash3_pivot_workspace_destroy(workspace);
     for (i=0;i<3;++i) subseqhash3_pivot_tables_destroy(expected+i);
     subseqhash3_pivot_table_file_close(&actual);
 }
@@ -124,7 +143,7 @@ static void bad_files(const char *path) {
     }
 }
 
-static void check_csv(const char *path,const char *tables_path,size_t w,size_t e,size_t r) {
+static void check_csv(const char *path,const char *tables_path,size_t w,size_t e,size_t r,int outward) {
     const uint8_t inputs[2][6]={{0,1,2,3,0,1},{3,3,3,3,0,1}};
     SubseqHash3PivotTableFile tables={0};
     SubseqHash3EditResult results[10]={{0}};
@@ -137,7 +156,8 @@ static void check_csv(const char *path,const char *tables_path,size_t w,size_t e
     assert(!strcmp(actual,"repeat,family,pivot,sequence,window_start,substitutions,"
         "deletions,seed,psi,omega\n"));
     for (sequence=0;sequence<2;++sequence) for (start=0;start<=6-w;++start) {
-        assert(!subseqhash3_compute_pivot_repeats(inputs[sequence]+start,w,e,
+        assert(!(outward?subseqhash3_compute_outward_pivot_repeats:
+            subseqhash3_compute_pivot_repeats)(inputs[sequence]+start,w,e,
             tables.tables,tables.count,r,results));
         for (repeat=0;repeat<r;++repeat) {
             for (j=0;j<w-1;++j) seed[j]="ACGT"[results[repeat].seed[j]];
@@ -181,15 +201,34 @@ int main(void) {
         assert(file.n==4 && file.d==31 && file.count==4);
         subseqhash3_pivot_table_file_close(&file);
         assert(!ssh3_repeats_main(8,run));
-        check_csv(csv,tables,4,2,10);
+        check_csv(csv,tables,4,2,10,1);
+        {
+            char *outward[]={"repeats","--outward",input,"4","2","31","10",csv,tables};
+            assert(!ssh3_repeats_main(9,outward));
+            check_csv(csv,tables,4,2,10,1);
+            char *inward[]={"repeats","--inward",input,"4","2","31","10",csv,tables};
+            assert(!ssh3_repeats_main(9,inward));
+            check_csv(csv,tables,4,2,10,0);
+            inward[1]=input; inward[2]="--inward";
+            assert(!ssh3_repeats_main(9,inward));
+            check_csv(csv,tables,4,2,10,0);
+            char *duplicate[]={"repeats",input,"4","2","31","10",csv,tables,"--outward","--outward"};
+            assert(ssh3_repeats_main(10,duplicate)!=0);
+            duplicate[8]="--inward"; duplicate[9]="--inward";
+            assert(ssh3_repeats_main(10,duplicate)!=0);
+            duplicate[9]="--outward";
+            assert(ssh3_repeats_main(10,duplicate)!=0);
+            duplicate[8]="--outward"; duplicate[9]="--inward";
+            assert(ssh3_repeats_main(10,duplicate)!=0);
+        }
         for (i=0;i<2;++i) {
             run[3]=i?"3":"0";
             assert(!ssh3_repeats_main(8,run));
-            check_csv(csv,tables,4,i?3:0,10);
+            check_csv(csv,tables,4,i?3:0,10,1);
         }
         run[2]="3"; run[3]="0"; run[5]="6";
         assert(!ssh3_repeats_main(8,run));
-        check_csv(csv,tables,3,0,6);
+        check_csv(csv,tables,3,0,6,1);
         run[5]="10";
         assert(ssh3_repeats_main(8,run)!=0); /* Shorter windows need more families. */
         run[2]="4"; run[3]="2";
@@ -198,7 +237,7 @@ int main(void) {
         run[6]=other; run[7]=generated;
         assert(!ssh3_repeats_main(8,run));
         same_file(csv,other);
-        check_csv(other,generated,4,2,10);
+        check_csv(other,generated,4,2,10,1);
         assert(!unlink(generated));
         run[6]=csv; run[7]=tables;
         {
@@ -263,6 +302,10 @@ int main(void) {
             put_text(input,sequence);
             assert(!ssh3_tables_main(8,make));
             assert(!ssh3_repeats_main(8,run));
+            char *inward_args[9];
+            for (size_t arg=0;arg<8;++arg) inward_args[arg]=run[arg];
+            inward_args[8]="--inward";
+            assert(!ssh3_repeats_main(9,inward_args));
             out=fopen(csv,"r"); assert(out);
             assert(fgets(row,sizeof(row),out));
             assert(fgets(row,sizeof(row),out));

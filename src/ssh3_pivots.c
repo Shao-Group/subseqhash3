@@ -12,12 +12,14 @@
 #define PIVOT_SIMD 0
 #endif
 
+#include "single_deletion.h"
 #define UNREACHABLE UINT16_MAX
 
 typedef struct {
     uint16_t *minimum,*maximum;
     uint8_t *parent;
-    size_t stride,states,layer,d,edits;
+    size_t stride,states,layer,d,edits,cells;
+    uint16_t padding[32];
 } PivotDP;
 
 typedef struct {
@@ -29,6 +31,8 @@ struct SubseqHash3PivotWorkspace {
     PivotDP left,right;
     size_t left_layers,right_layers,scratch_capacity;
     size_t *scratch;
+    PivotDP outward_left[2],outward_right[2];
+    size_t outward_left_layers[2],outward_right_layers[2];
 };
 
 SubseqHash3PivotWorkspace *subseqhash3_pivot_workspace_create(void) {
@@ -37,6 +41,9 @@ SubseqHash3PivotWorkspace *subseqhash3_pivot_workspace_create(void) {
 
 static void workspace_clear(SubseqHash3PivotWorkspace *workspace) {
     free(workspace->left.minimum); free(workspace->right.minimum);
+    for (size_t i=0;i<2;++i) {
+        free(workspace->outward_left[i].minimum); free(workspace->outward_right[i].minimum);
+    }
     free(workspace->scratch);
     memset(workspace,0,sizeof(*workspace));
 }
@@ -138,7 +145,7 @@ static size_t dp_parent(const PivotDP *dp,size_t l,size_t h,size_t e) {
     return (l*dp->states+h*(dp->edits+1)+e)*dp->d;
 }
 
-static void circular_padding(uint16_t *p,size_t d) {
+static void circular_padding(uint16_t *p,size_t d,const uint16_t *indices) {
     size_t done=0;
 #if PIVOT_SIMD
     /* A 32-lane load starting at D-1 needs only 31 wrapped elements.
@@ -147,6 +154,17 @@ static void circular_padding(uint16_t *p,size_t d) {
     if (d>=31) {
         _mm512_storeu_si512((void *)(p+d),
             _mm512_loadu_si512((const void *)p));
+        return;
+    }
+    const __mmask32 active=(UINT32_C(1)<<d)-1;
+    const __m512i values=_mm512_maskz_loadu_epi16(active,p);
+    _mm512_storeu_si512((void *)(p+d),_mm512_permutexvar_epi16(
+        _mm512_loadu_si512((const void *)indices),values));
+    return;
+#else
+    (void)indices;
+    if (d==1) {
+        for (size_t r=1;r<=31;++r) p[r]=p[0];
         return;
     }
 #endif
@@ -160,14 +178,15 @@ static void circular_padding(uint16_t *p,size_t d) {
 static int dp_allocate(PivotDP *dp,size_t n,size_t edits,size_t d) {
     size_t cells,bytes;
     memset(dp,0,sizeof(*dp));
-    if (d>SIZE_MAX-63 || edits==SIZE_MAX || edits+1>SIZE_MAX/2) return -1;
+    if (!d || d>SIZE_MAX-63 || edits==SIZE_MAX || edits+1>SIZE_MAX/2) return -1;
     dp->d=d; dp->edits=edits;
-    dp->stride=((d+31)&~(size_t)31)+32;
+    if (d<31) for (size_t r=0;r<32;++r) dp->padding[r]=(uint16_t)(r%d);
+    dp->stride=(PIVOT_SIMD && d==1 && edits<32)?1:((d+31)&~(size_t)31)+32;
     dp->states=2*(edits+1);
     if (dp->states>SIZE_MAX/d || dp->states>SIZE_MAX/dp->stride) return -1;
     dp->layer=dp->states*dp->stride;
     if (n>SIZE_MAX/dp->layer) return -1;
-    cells=n*dp->layer;
+    cells=n*dp->layer; dp->cells=cells;
     if (cells>SIZE_MAX/(2*sizeof(uint16_t))) return -1;
     bytes=2*cells*sizeof(uint16_t);
     /* Small residue spaces favor direct traceback; for large spaces avoid
@@ -195,13 +214,66 @@ static void empty_state(PivotDP *dp,size_t l,size_t h) {
     memset(dp->minimum+state,255,dp->stride*sizeof(uint16_t));
     memset(dp->maximum+state,255,dp->stride*sizeof(uint16_t));
     dp->minimum[state]=dp->maximum[state]=0;
-    circular_padding(dp->minimum+state,dp->d);
-    circular_padding(dp->maximum+state,dp->d);
+    circular_padding(dp->minimum+state,dp->d,dp->padding);
+    circular_padding(dp->maximum+state,dp->d,dp->padding);
     if (dp->parent) memset(dp->parent+dp_parent(dp,l,h,0),0,dp->d);
 }
 
+#if PIVOT_SIMD
+/* With one residue, spend SIMD lanes on edit counts instead. All edit
+   states fit in one register for the common E<32 case; no padding is needed. */
+static void dp_build_one(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum,
+    const SubseqHash3PivotTables *tables,int reverse) {
+    PivotDP layout __attribute__((aligned(64)))=*workspace;
+    PivotDP *dp=&layout;
+    const SubseqHash3Tables *t=reverse?&tables->right:&tables->left;
+    const size_t width=dp->edits+1;
+    const __mmask32 active=width==32?UINT32_MAX:(UINT32_C(1)<<width)-1;
+    const __m512i infinity=_mm512_set1_epi16(-1);
+    const __m512i previous=_mm512_set_epi16(30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,
+        14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,31);
+    memset(dp->minimum,255,2*dp->cells*sizeof(uint16_t));
+    dp->minimum[dp_state(dp,0,0,0)]=dp->maximum[dp_state(dp,0,0,0)]=0;
+    dp->minimum[dp_state(dp,1,1,0)]=dp->maximum[dp_state(dp,1,1,0)]=0;
+    for (size_t j=1;j<maximum;++j) for (size_t h=0;h<=1;++h) {
+        const size_t l=j+h,src=dp_state(dp,l-1,h,0),dst=dp_state(dp,l,h,0);
+        const unsigned original=s[reverse?n-l:l-1];
+        const __m512i kept_min=_mm512_maskz_loadu_epi16(active,dp->minimum+src);
+        const __m512i kept_max=_mm512_maskz_loadu_epi16(active,dp->maximum+src);
+        const __m512i changed_min=_mm512_mask_permutexvar_epi16(infinity,active&~1u,previous,kept_min);
+        const __m512i changed_max=_mm512_mask_permutexvar_epi16(infinity,active&~1u,previous,kept_max);
+        const size_t deletion=h?dp_state(dp,l-1,0,0):0;
+        __m512i mn=h?_mm512_maskz_loadu_epi16(active,dp->minimum+deletion):infinity;
+        __m512i mx=h?_mm512_maskz_loadu_epi16(active,dp->maximum+deletion):infinity;
+        __m256i low=_mm256_setzero_si256(),high=low;
+        for (unsigned candidate=0;candidate<4;++candidate) {
+            const unsigned symbol=candidate<3?candidate+(candidate>=original):original;
+            const size_t row=4*(j-1)+symbol;
+            const int positive=t->B1[row]>0,add=t->signed_A[row];
+            const __m512i pl=candidate<3?changed_min:kept_min;
+            const __m512i ph=candidate<3?changed_max:kept_max;
+            const __m512i lo=_mm512_adds_epu16(positive?pl:ph,_mm512_set1_epi16((short)(127+add)));
+            const __m512i hi=_mm512_adds_epu16(positive?ph:pl,_mm512_set1_epi16((short)(127-add)));
+            low=_mm256_mask_mov_epi8(low,_mm512_cmplt_epu16_mask(lo,mn),
+                _mm256_set1_epi8((char)(2*symbol+(positive?1:2))));
+            high=_mm256_mask_mov_epi8(high,_mm512_cmplt_epu16_mask(hi,mx),
+                _mm256_set1_epi8((char)((2*symbol+(positive?2:1))<<4)));
+            mn=_mm512_min_epu16(mn,lo); mx=_mm512_min_epu16(mx,hi);
+        }
+        _mm512_mask_storeu_epi16(dp->minimum+dst,active,mn);
+        _mm512_mask_storeu_epi16(dp->maximum+dst,active,mx);
+        _mm256_mask_storeu_epi8(dp->parent+dp_parent(dp,l,h,0),active,_mm256_or_si256(low,high));
+    }
+}
+#endif
+
 static void dp_build(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum,
     const SubseqHash3PivotTables *tables,int reverse,int record) {
+#if PIVOT_SIMD
+    if (workspace->d==1 && workspace->edits<32) {
+        dp_build_one(workspace,s,n,maximum,tables,reverse); return;
+    }
+#endif
     /* Keep immutable layout metadata out of the score arrays' alias set.
        Explicit alignment also avoids GCC's aligned struct-copy store into
        an insufficiently aligned ASan fake-stack slot. */
@@ -217,129 +289,133 @@ static void dp_build(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum
     /* Visit both deletion planes at the same retained length. They use the
        same table row; h=1's deletion predecessor is the just-built h=0
        state. The other predecessors have retained length j-1. */
-    for (j=1;j<maximum;++j) for (h=0;h<=1;++h) {
-        const size_t retained=j,max_e=retained<dp->edits?retained:dp->edits;
-        const size_t min_e=dp->edits>n-1-retained?
-            dp->edits-(n-1-retained):0;
-        l=j+h;
-        const unsigned original=s[reverse?n-l:l-1];
-        size_t shifts[4];
-        for (a=0;a<4;++a) {
-            shifts[a]=t->C[4*(retained-1)+a];
-            if (reverse && shifts[a]) shifts[a]=d-shifts[a];
-        }
+    for (j=1;j<maximum;++j) {
+#pragma GCC unroll 2
+        for (h=0;h<=1;++h) {
+            const size_t retained=j,max_e=retained<dp->edits?retained:dp->edits;
+            const size_t min_e=dp->edits>n-1-retained?
+                dp->edits-(n-1-retained):0;
+            l=j+h;
+            const unsigned original=s[reverse?n-l:l-1];
+            size_t shifts[4];
+            for (a=0;a<4;++a) {
+                shifts[a]=t->C[4*(retained-1)+a];
+                if (reverse && shifts[a]) shifts[a]=d-shifts[a];
+            }
 #if PIVOT_SIMD
-        for (r=0;r<d;r+=32) {
-            const size_t lanes=d-r<32?d-r:32;
-            const __mmask32 active=lanes==32?(__mmask32)UINT32_MAX:
-                (__mmask32)((UINT32_C(1)<<lanes)-1);
-            const __m512i infinity=_mm512_set1_epi16(-1);
-            const __m512i bias=_mm512_set1_epi16(127);
-            const unsigned sym0=original==0?1:0;
-            const unsigned sym1=original<=1?2:1;
-            const unsigned sym2=original<=2?3:2;
+            for (r=0;r<d;r+=32) {
+                const size_t lanes=d-r<32?d-r:32;
+                const __mmask32 active=lanes==32?(__mmask32)UINT32_MAX:
+                    (__mmask32)((UINT32_C(1)<<lanes)-1);
+                const __m512i infinity=_mm512_set1_epi16(-1);
+                const __m512i bias=_mm512_set1_epi16(127);
+                const unsigned sym0=original==0?1:0;
+                const unsigned sym1=original<=1?2:1;
+                const unsigned sym2=original<=2?3:2;
 #define PREPARE(ID,SYM) \
-            const size_t row##ID=4*(retained-1)+(SYM); \
-            const __m512i add##ID=_mm512_cvtepi8_epi16( \
-                _mm256_maskz_loadu_epi8(active,signed_A+row##ID*d+r)); \
-            const __m512i plus##ID=_mm512_add_epi16(bias,add##ID); \
-            const __m512i minus##ID=_mm512_sub_epi16(bias,add##ID); \
-            const __mmask32 positive##ID=(__mmask32)masks[row##ID*t->blocks+r/32]; \
-            const size_t q##ID=subtract_residue(r,shifts[SYM],d)
-            PREPARE(0,sym0); PREPARE(1,sym1); PREPARE(2,sym2);
-            PREPARE(3,original);
+                const size_t row##ID=4*(retained-1)+(SYM); \
+                const __m512i add##ID=_mm512_cvtepi8_epi16( \
+                    _mm256_maskz_loadu_epi8(active,signed_A+row##ID*d+r)); \
+                const __m512i plus##ID=_mm512_add_epi16(bias,add##ID); \
+                const __m512i minus##ID=_mm512_sub_epi16(bias,add##ID); \
+                const __mmask32 positive##ID=(__mmask32)masks[row##ID*t->blocks+r/32]; \
+                const size_t q##ID=subtract_residue(r,shifts[SYM],d)
+                PREPARE(0,sym0); PREPARE(1,sym1); PREPARE(2,sym2);
+                PREPARE(3,original);
 #undef PREPARE
+#pragma GCC unroll 16
+                for (e=min_e;e<=max_e;++e) {
+                    const size_t dst=dp_state(dp,l,h,e);
+                    const size_t deletion=h?dp_state(dp,l-1,h-1,e):0;
+                    __m512i mn=h?_mm512_load_si512(
+                        (const void *)(dp->minimum+deletion+r)):infinity;
+                    __m512i mx=h?_mm512_load_si512(
+                        (const void *)(dp->maximum+deletion+r)):infinity;
+                    __m256i low=_mm256_setzero_si256(),high=low;
+#define PIVOT_UPDATE(ID,SOURCE) do { \
+        const size_t src_=(SOURCE)+q##ID; \
+        const __m512i smn_=_mm512_loadu_si512((const void *)(dp->minimum+src_)); \
+        const __m512i smx_=_mm512_loadu_si512((const void *)(dp->maximum+src_)); \
+        const __m512i selected_=_mm512_mask_blend_epi16(positive##ID,smx_,smn_); \
+        const __m512i other_=_mm512_ternarylogic_epi32(smn_,smx_,selected_,0x96); \
+        const __m512i lo_=_mm512_adds_epu16(selected_,plus##ID); \
+        const __m512i hi_=_mm512_adds_epu16(other_,minus##ID); \
+        if (record) { \
+            const unsigned sym_=(ID)==0?sym0:(ID)==1?sym1:(ID)==2?sym2:original; \
+            const unsigned base_=2*sym_; \
+            const __m256i code_=_mm256_mask_blend_epi8(positive##ID, \
+                _mm256_set1_epi8((char)((base_+2)|((base_+1)<<4))), \
+                _mm256_set1_epi8((char)((base_+1)|((base_+2)<<4)))); \
+            low=_mm256_mask_mov_epi8(low,_mm512_cmplt_epu16_mask(lo_,mn),code_); \
+            high=_mm256_mask_mov_epi8(high,_mm512_cmplt_epu16_mask(hi_,mx),code_); \
+        } \
+        mn=_mm512_min_epu16(mn,lo_); mx=_mm512_min_epu16(mx,hi_); \
+    } while (0)
+                    if (e) {
+                        const size_t changed=dp_state(dp,l-1,h,e-1);
+                        PIVOT_UPDATE(0,changed); PIVOT_UPDATE(1,changed);
+                        PIVOT_UPDATE(2,changed);
+                    }
+                    if (e<retained) {
+                        const size_t kept=dp_state(dp,l-1,h,e);
+                        PIVOT_UPDATE(3,kept);
+                    }
+#undef PIVOT_UPDATE
+                    _mm512_store_si512((void *)(dp->minimum+dst+r),mn);
+                    _mm512_store_si512((void *)(dp->maximum+dst+r),mx);
+                    if (record) _mm256_mask_storeu_epi8(
+                        dp->parent+dp_parent(dp,l,h,e)+r,active,
+                        _mm256_ternarylogic_epi32(low,high,
+                            _mm256_set1_epi8((char)0xf0),0xd8));
+                }
+            }
+#else
             for (e=min_e;e<=max_e;++e) {
                 const size_t dst=dp_state(dp,l,h,e);
-                const size_t deletion=h?dp_state(dp,l-1,h-1,e):0;
-                __m512i mn=h?_mm512_load_si512(
-                    (const void *)(dp->minimum+deletion+r)):infinity;
-                __m512i mx=h?_mm512_load_si512(
-                    (const void *)(dp->maximum+deletion+r)):infinity;
-                __m256i low=_mm256_setzero_si256(),high=low;
-#define PIVOT_UPDATE(ID,SOURCE) do { \
-    const size_t src_=(SOURCE)+q##ID; \
-    const __m512i smn_=_mm512_loadu_si512((const void *)(dp->minimum+src_)); \
-    const __m512i smx_=_mm512_loadu_si512((const void *)(dp->maximum+src_)); \
-    const __m512i lo_=_mm512_adds_epu16( \
-        _mm512_mask_blend_epi16(positive##ID,smx_,smn_),plus##ID); \
-    const __m512i hi_=_mm512_adds_epu16( \
-        _mm512_mask_blend_epi16(positive##ID,smn_,smx_),minus##ID); \
-    if (record) { \
-        const unsigned sym_=(ID)==0?sym0:(ID)==1?sym1:(ID)==2?sym2:original; \
-        const unsigned base_=2*sym_; \
-        const __m256i code_=_mm256_mask_blend_epi8(positive##ID, \
-            _mm256_set1_epi8((char)((base_+2)|((base_+1)<<4))), \
-            _mm256_set1_epi8((char)((base_+1)|((base_+2)<<4)))); \
-        low=_mm256_mask_mov_epi8(low,_mm512_cmplt_epu16_mask(lo_,mn),code_); \
-        high=_mm256_mask_mov_epi8(high,_mm512_cmplt_epu16_mask(hi_,mx),code_); \
-    } \
-    mn=_mm512_min_epu16(mn,lo_); mx=_mm512_min_epu16(mx,hi_); \
-} while (0)
-                if (e) {
-                    const size_t changed=dp_state(dp,l-1,h,e-1);
-                    PIVOT_UPDATE(0,changed); PIVOT_UPDATE(1,changed);
-                    PIVOT_UPDATE(2,changed);
-                }
-                if (e<retained) {
-                    const size_t kept=dp_state(dp,l-1,h,e);
-                    PIVOT_UPDATE(3,kept);
-                }
-#undef PIVOT_UPDATE
-                _mm512_store_si512((void *)(dp->minimum+dst+r),mn);
-                _mm512_store_si512((void *)(dp->maximum+dst+r),mx);
-                if (record) _mm256_mask_storeu_epi8(
-                    dp->parent+dp_parent(dp,l,h,e)+r,active,
-                    _mm256_ternarylogic_epi32(low,high,
-                        _mm256_set1_epi8((char)0xf0),0xd8));
-            }
-        }
-#else
-        for (e=min_e;e<=max_e;++e) {
-            const size_t dst=dp_state(dp,l,h,e);
-            for (r=0;r<d;++r) {
-                unsigned mn=UNREACHABLE,mx=UNREACHABLE,low=0,high=0;
-                unsigned candidate;
-                if (h) {
-                    const size_t previous=dp_state(dp,l-1,0,e)+r;
-                    mn=dp->minimum[previous]; mx=dp->maximum[previous];
-                }
-                for (candidate=0;candidate<4;++candidate) {
-                    const unsigned symbol=candidate<3?
-                        candidate+(candidate>=original):original;
-                    const size_t changed=symbol!=original;
-                    size_t src,table;
-                    unsigned lo,hi;
-                    int add,positive;
-                    if (changed?(!e):(e>=retained)) continue;
-                    src=dp_state(dp,l-1,h,e-changed)+
-                        subtract_residue(r,shifts[symbol],d);
-                    table=(4*(retained-1)+symbol)*d+r;
-                    add=signed_A[table];
-                    positive=(masks[(4*(retained-1)+symbol)*t->blocks+r/32]>>
-                        (r%32))&1u;
-                    lo=positive?dp->minimum[src]:dp->maximum[src];
-                    hi=positive?dp->maximum[src]:dp->minimum[src];
-                    if (lo!=UNREACHABLE && lo+(unsigned)(127+add)<mn) {
-                        mn=lo+(unsigned)(127+add);
-                        low=2*symbol+(positive?1u:2u);
+                for (r=0;r<d;++r) {
+                    unsigned mn=UNREACHABLE,mx=UNREACHABLE,low=0,high=0;
+                    unsigned candidate;
+                    if (h) {
+                        const size_t previous=dp_state(dp,l-1,0,e)+r;
+                        mn=dp->minimum[previous]; mx=dp->maximum[previous];
                     }
-                    if (hi!=UNREACHABLE && hi+(unsigned)(127-add)<mx) {
-                        mx=hi+(unsigned)(127-add);
-                        high=2*symbol+(positive?2u:1u);
+                    for (candidate=0;candidate<4;++candidate) {
+                        const unsigned symbol=candidate<3?
+                            candidate+(candidate>=original):original;
+                        const size_t changed=symbol!=original;
+                        size_t src,table;
+                        unsigned lo,hi;
+                        int add,positive;
+                        if (changed?(!e):(e>=retained)) continue;
+                        src=dp_state(dp,l-1,h,e-changed)+
+                            subtract_residue(r,shifts[symbol],d);
+                        table=(4*(retained-1)+symbol)*d+r;
+                        add=signed_A[table];
+                        positive=(masks[(4*(retained-1)+symbol)*t->blocks+r/32]>>
+                            (r%32))&1u;
+                        lo=positive?dp->minimum[src]:dp->maximum[src];
+                        hi=positive?dp->maximum[src]:dp->minimum[src];
+                        if (lo!=UNREACHABLE && lo+(unsigned)(127+add)<mn) {
+                            mn=lo+(unsigned)(127+add);
+                            low=2*symbol+(positive?1u:2u);
+                        }
+                        if (hi!=UNREACHABLE && hi+(unsigned)(127-add)<mx) {
+                            mx=hi+(unsigned)(127-add);
+                            high=2*symbol+(positive?2u:1u);
+                        }
                     }
+                    dp->minimum[dst+r]=(uint16_t)mn;
+                    dp->maximum[dst+r]=(uint16_t)mx;
+                    if (record) dp->parent[dp_parent(dp,l,h,e)+r]=
+                        (uint8_t)(low|(high<<4));
                 }
-                dp->minimum[dst+r]=(uint16_t)mn;
-                dp->maximum[dst+r]=(uint16_t)mx;
-                if (record) dp->parent[dp_parent(dp,l,h,e)+r]=
-                    (uint8_t)(low|(high<<4));
             }
-        }
 #endif
-        for (e=min_e;e<=max_e;++e) {
-            const size_t dst=dp_state(dp,l,h,e);
-            circular_padding(dp->minimum+dst,d);
-            circular_padding(dp->maximum+dst,d);
+            for (e=min_e;e<=max_e;++e) {
+                const size_t dst=dp_state(dp,l,h,e);
+                circular_padding(dp->minimum+dst,d,dp->padding);
+                circular_padding(dp->maximum+dst,d,dp->padding);
+            }
         }
     }
 }
@@ -434,13 +510,14 @@ static unsigned minimum_word(__m512i values) {
         pairs,_mm512_set1_epi32(65535)));
 }
 
-/* When the whole residue space fits in one register, keep the winning
-   candidate in lanes across ALL edit splits, and reduce just once. */
-static int choose_pivot_small(const uint8_t *s,size_t n,size_t edits,size_t pivot,
+/* Delay horizontal reductions until all edit splits have been compared.
+   A lane retains the minimum across residue blocks; indices retain the
+   strict candidate order independently of the winning residue. */
+static int choose_pivot_zero(const uint8_t *s,size_t n,size_t edits,size_t pivot,
     const SubseqHash3PivotTables *t,const PivotDP *left,const PivotDP *right,
     PivotChoice *choice) {
     const size_t k=n-1,d=t->d,width=edits+1;
-    const __mmask32 active=d==32?(__mmask32)UINT32_MAX:
+    const __mmask32 active=d>=32?(__mmask32)UINT32_MAX:
         (__mmask32)((UINT32_C(1)<<d)-1);
     __m512i minimum=_mm512_set1_epi16(-1),indices=minimum;
     size_t input,e,table,ls,rs,shift,arg,id;
@@ -466,8 +543,23 @@ static int choose_pivot_small(const uint8_t *s,size_t n,size_t edits,size_t pivo
                 rs=dp_state(right,n-input-1,right_del,right_e);
                 lc=(t->pivot_left_sign[table]>0?left->maximum:left->minimum)+ls;
                 rc=(t->pivot_right_sign[table]>0?right->maximum:right->minimum)+rs;
-                cost=_mm512_adds_epu16(_mm512_load_si512((const void *)lc),
-                    _mm512_loadu_si512((const void *)(rc+t->pivot_C[table])));
+                if (d==1) {
+                    const unsigned scalar=(unsigned)lc[0]+rc[0];
+                    cost=_mm512_set1_epi16((short)(scalar<UNREACHABLE?scalar:UNREACHABLE));
+                } else if (d<=32) {
+                    cost=_mm512_adds_epu16(_mm512_load_si512((const void *)lc),
+                        _mm512_loadu_si512((const void *)(rc+t->pivot_C[table])));
+                } else {
+                cost=_mm512_set1_epi16(-1);
+                for (size_t q=0;q<d;q+=32) {
+                    const size_t lanes=d-q<32?d-q:32;
+                    const __mmask32 valid=lanes==32?UINT32_MAX:(UINT32_C(1)<<lanes)-1;
+                    const size_t start=q>=d-t->pivot_C[table]?q-(d-t->pivot_C[table]):q+t->pivot_C[table];
+                    const __m512i sum=_mm512_adds_epu16(_mm512_load_si512((const void *)(lc+q)),
+                        _mm512_loadu_si512((const void *)(rc+start)));
+                    cost=_mm512_mask_min_epu16(cost,valid,cost,sum);
+                }
+                }
                 cost=_mm512_adds_epu16(cost,bias);
                 better=active&_mm512_cmplt_epu16_mask(cost,minimum);
                 minimum=_mm512_mask_mov_epi16(minimum,better,cost);
@@ -496,7 +588,7 @@ static int choose_pivot_small(const uint8_t *s,size_t n,size_t edits,size_t pivo
     lc=(t->pivot_left_sign[table]>0?left->maximum:left->minimum)+ls;
     rc=(t->pivot_right_sign[table]>0?right->maximum:right->minimum)+rs;
     shift=t->pivot_C[table];
-    arg=join_witness(lc,rc,d,shift,best-(unsigned)(127-t->pivot_A[table]));
+    arg=d==1?0:join_witness(lc,rc,d,shift,best-(unsigned)(127-t->pivot_A[table]));
     choice->left_residue=arg;
     choice->right_residue=arg>=d-shift?arg-(d-shift):arg+shift;
     return 0;
@@ -510,7 +602,7 @@ static int choose_pivot(const uint8_t *s,size_t n,size_t edits,size_t pivot,
     size_t input,e;
     unsigned symbol;
 #if PIVOT_SIMD
-    if (d<=32 && !choose_pivot_small(s,n,edits,pivot,t,left,right,choice))
+    if (!choose_pivot_zero(s,n,edits,pivot,t,left,right,choice))
         return 0;
 #endif
     memset(choice,0,sizeof(*choice)); choice->psi=d; choice->cost=UNREACHABLE;
@@ -577,7 +669,8 @@ static int choose_pivot(const uint8_t *s,size_t n,size_t edits,size_t pivot,
 
 static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
     const SubseqHash3Tables *t,int reverse,size_t l,size_t h,size_t e,
-    size_t residue,int type,SubseqHash3EditResult *out) {
+    size_t residue,int type,SubseqHash3EditResult *out,int outward,
+    size_t anchor,size_t pivot) {
     size_t retained=l-h;
     while (retained) {
         const size_t current=dp_state(dp,l,h,e)+residue;
@@ -623,12 +716,13 @@ static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
                 }
             }
         }
-        position=reverse?n-l:l-1;
-        output=reverse?out->length-retained:retained-1;
+        position=outward?(reverse?anchor+l:anchor-l):(reverse?n-l:l-1);
+        output=outward?(reverse?pivot+retained:pivot-retained):
+            (reverse?out->length-retained:retained-1);
         out->seed[output]=(uint8_t)symbol;
         out->positions[output]=position;
-        out->substituted[output]=(uint8_t)(symbol!=s[position]);
-        if (symbol!=s[position]) --e;
+        out->substituted[output]=(uint8_t)(symbol!=original);
+        if (symbol!=original) --e;
         shift=t->C[4*(retained-1)+symbol];
         if (reverse && shift) shift=dp->d-shift;
         residue=subtract_residue(residue,shift,dp->d);
@@ -636,15 +730,83 @@ static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
     }
 }
 
+/* An anchor's outward sides become ordinary inward prefixes/suffixes after
+   reversing each side in a temporary input. Keep two adjacent anchors cached:
+   output pivot p only needs input anchors p and p+1. */
+static void outward_input(uint8_t *dst,const uint8_t *s,size_t n,size_t anchor) {
+    for (size_t j=0;j<anchor;++j) dst[j]=s[anchor-1-j];
+    dst[anchor]=s[anchor];
+    for (size_t j=anchor+1;j<n;++j) dst[j]=s[n+anchor-j];
+}
+static void copy_boundary(PivotDP *dst,const PivotDP *src,size_t l,size_t h,size_t k) {
+    const size_t retained=l-h,edits=dst->edits,d=dst->d;
+    const size_t minimum=edits>k-retained?edits-(k-retained):0;
+    for (size_t e=0;e<=edits;++e) {
+        const size_t at=dp_state(dst,l,h,e),from=dp_state(src,l,h,e);
+        if (e>retained || e<minimum) {
+            memset(dst->minimum+at,255,dst->stride*sizeof(uint16_t));
+            memset(dst->maximum+at,255,dst->stride*sizeof(uint16_t));
+        } else {
+            memcpy(dst->minimum+at,src->minimum+from,d*sizeof(uint16_t));
+            memcpy(dst->maximum+at,src->maximum+from,d*sizeof(uint16_t));
+            if (dst->stride>1) { circular_padding(dst->minimum+at,d,dst->padding); circular_padding(dst->maximum+at,d,dst->padding); }
+        }
+    }
+}
+static int compute_outward_seeds(const uint8_t *s,size_t n,size_t edits,
+    const SubseqHash3PivotTables *t,const size_t *pivots,size_t count,
+    SubseqHash3EditResult *results,SubseqHash3PivotWorkspace *w) {
+    size_t cached[2]={SIZE_MAX,SIZE_MAX};
+    uint8_t transformed[257];
+    const size_t k=n-1;
+    for (size_t a=0;a<count;++a) {
+        const size_t p=pivots?pivots[a]:a;
+        for (size_t i=p;i<=p+1;++i) {
+            const size_t slot=i%2;
+            PivotDP *l=&w->outward_left[slot],*r=&w->outward_right[slot];
+            if (cached[slot]!=i) {
+                if (dp_reserve(l,&w->outward_left_layers[slot],i+2,edits,t->d) ||
+                    dp_reserve(r,&w->outward_right_layers[slot],n-i+1,edits,t->d)) return -1;
+                outward_input(transformed,s,n,i);
+                dp_build(l,transformed,n,i+1,t,0,l->parent!=NULL);
+                dp_build(r,transformed,n,n-i,t,1,r->parent!=NULL);
+                cached[slot]=i;
+            }
+            copy_boundary(&w->left,l,i,i-p,k);
+            copy_boundary(&w->right,r,n-i-1,1-(i-p),k);
+        }
+        PivotChoice choice;
+        SubseqHash3EditResult *out=results+a;
+        if (choose_pivot(s,n,edits,p,t,&w->left,&w->right,w->scratch,&choice)) return -1;
+        out->seed=malloc(k); out->positions=malloc(k*sizeof(*out->positions));
+        out->substituted=malloc(k);
+        if (!out->seed || !out->positions || !out->substituted) return -1;
+        out->length=k; out->deletions=1; out->substitutions=edits;
+        out->psi=choice.psi; out->omega=127.0*k-choice.cost;
+        out->seed[p]=(uint8_t)choice.symbol; out->positions[p]=choice.input_pivot;
+        out->substituted[p]=(uint8_t)(choice.symbol!=s[choice.input_pivot]);
+        const size_t i=choice.input_pivot,slot=i%2,table=4*p+choice.symbol;
+        const size_t left_del=i-p,changed=out->substituted[p];
+        outward_input(transformed,s,n,i);
+        trace_side(transformed,n,&w->outward_left[slot],&t->left,0,i,left_del,
+            choice.left_substitutions,choice.left_residue,
+            t->pivot_left_sign[table]>0?2:1,out,1,i,p);
+        trace_side(transformed,n,&w->outward_right[slot],&t->right,1,n-i-1,1-left_del,
+            edits-changed-choice.left_substitutions,choice.right_residue,
+            t->pivot_right_sign[table]>0?2:1,out,1,i,p);
+    }
+    return 0;
+}
+
 static int compute_pivot_seeds_impl(const uint8_t *s,size_t n,size_t edits,
     const SubseqHash3PivotTables *t,const size_t *pivots,size_t count,
-    SubseqHash3EditResult *results,SubseqHash3PivotWorkspace *workspace) {
+    SubseqHash3EditResult *results,SubseqHash3PivotWorkspace *workspace,int outward) {
     PivotDP *left=&workspace->left,*right=&workspace->right;
     size_t *scratch=NULL,index,k,min_pivot,max_pivot;
     int status=-1;
     if (!results || !count || count>SIZE_MAX/sizeof(*results)) return -1;
     memset(results,0,count*sizeof(*results));
-    if (!s || !t || n<2 || n-1>t->k || !t->d || edits>n-1 ||
+    if (!s || !t || n<2 || n>257 || n-1>t->k || !t->d || edits>n-1 ||
         (!pivots && count>n-1)) return -1;
     k=n-1;
     for (index=0;index<n;++index) if (s[index]>3) return -1;
@@ -654,6 +816,25 @@ static int compute_pivot_seeds_impl(const uint8_t *s,size_t n,size_t edits,
         if (pivot>=k) return -1;
         if (pivot<min_pivot) min_pivot=pivot;
         if (pivot>max_pivot) max_pivot=pivot;
+    }
+    if (!edits && count<=256 && t->d>=128 && t->d>=(outward?8:4)*n) {
+        const SingleSide l={NULL,t->left.signed_A,t->left.B1,t->left.C};
+        const SingleSide r={NULL,t->right.signed_A,t->right.B1,t->right.C};
+        SingleChoice choices[256];
+        single_deletion_choices(s,n,t->d,&l,&r,NULL,t->pivot_A,
+            t->pivot_left_sign,t->pivot_right_sign,t->pivot_C,pivots,count,!outward,choices);
+        for (index=0;index<count;++index) {
+            SubseqHash3EditResult *out=results+index;
+            out->length=k; out->deletions=1; out->substitutions=0;
+            out->psi=choices[index].psi; out->omega=(double)choices[index].omega;
+            out->seed=malloc(k); out->positions=malloc(k*sizeof(size_t)); out->substituted=calloc(k,1);
+            if (!out->seed || !out->positions || !out->substituted) goto done;
+            for (size_t j=0;j<k;++j) {
+                size_t pos=j+(j>=choices[index].deleted);
+                out->seed[j]=s[pos]; out->positions[j]=pos;
+            }
+        }
+        return 0;
     }
     if (t->d>SIZE_MAX/sizeof(*scratch)) return -1;
     if (workspace->scratch_capacity<t->d) {
@@ -665,6 +846,10 @@ static int compute_pivot_seeds_impl(const uint8_t *s,size_t n,size_t edits,
     if (dp_reserve(left,&workspace->left_layers,max_pivot+2,edits,t->d) ||
         dp_reserve(right,&workspace->right_layers,n-min_pivot,edits,t->d))
         goto done;
+    if (outward) {
+        status=compute_outward_seeds(s,n,edits,t,pivots,count,results,workspace);
+        goto done;
+    }
     if (left->parent) dp_build(left,s,n,max_pivot+1,t,0,1);
     else dp_build(left,s,n,max_pivot+1,t,0,0);
     if (right->parent) dp_build(right,s,n,n-min_pivot-1,t,1,1);
@@ -688,10 +873,10 @@ static int compute_pivot_seeds_impl(const uint8_t *s,size_t n,size_t edits,
         changed=out->substituted[pivot];
         trace_side(s,n,left,&t->left,0,choice.input_pivot,left_del,
             choice.left_substitutions,choice.left_residue,
-            t->pivot_left_sign[table]>0?2:1,out);
+            t->pivot_left_sign[table]>0?2:1,out,0,0,0);
         trace_side(s,n,right,&t->right,1,n-choice.input_pivot-1,1-left_del,
             edits-changed-choice.left_substitutions,choice.right_residue,
-            t->pivot_right_sign[table]>0?2:1,out);
+            t->pivot_right_sign[table]>0?2:1,out,0,0,0);
     }
     status=0;
 done:
@@ -703,14 +888,14 @@ int subseqhash3_compute_pivot_seeds(const uint8_t *s,size_t n,size_t edits,
     const SubseqHash3PivotTables *t,const size_t *pivots,size_t count,
     SubseqHash3EditResult *results) {
     SubseqHash3PivotWorkspace workspace={0};
-    int status=compute_pivot_seeds_impl(s,n,edits,t,pivots,count,results,&workspace);
+    int status=compute_pivot_seeds_impl(s,n,edits,t,pivots,count,results,&workspace,0);
     workspace_clear(&workspace);
     return status;
 }
 
-int subseqhash3_compute_pivot_repeats_with_workspace(const uint8_t *s,size_t n,size_t edits,
+static int compute_repeats_order(const uint8_t *s,size_t n,size_t edits,
     const SubseqHash3PivotTables *tables,size_t table_count,size_t repeats,
-    SubseqHash3EditResult *results,SubseqHash3PivotWorkspace *workspace) {
+    SubseqHash3EditResult *results,SubseqHash3PivotWorkspace *workspace,int outward) {
     size_t needed,family,done=0,k;
     if (!workspace || !results || !tables || n<2 || !repeats ||
         repeats>SIZE_MAX/sizeof(*results)) return -1;
@@ -720,13 +905,38 @@ int subseqhash3_compute_pivot_repeats_with_workspace(const uint8_t *s,size_t n,s
     for (family=0;family<needed;++family) {
         size_t count=repeats-done<k?repeats-done:k;
         if (compute_pivot_seeds_impl(s,n,edits,tables+family,NULL,
-                count,results+done,workspace)) {
+                count,results+done,workspace,outward)) {
             subseqhash3_edit_results_destroy(results,repeats);
             return -1;
         }
         done+=count;
     }
     return 0;
+}
+
+int subseqhash3_compute_pivot_repeats_with_workspace(const uint8_t *s,size_t n,size_t edits,
+    const SubseqHash3PivotTables *tables,size_t table_count,size_t repeats,
+    SubseqHash3EditResult *results,SubseqHash3PivotWorkspace *workspace) {
+    return compute_repeats_order(s,n,edits,tables,table_count,repeats,results,workspace,0);
+}
+int subseqhash3_compute_outward_pivot_repeats_with_workspace(const uint8_t *s,size_t n,size_t edits,
+    const SubseqHash3PivotTables *tables,size_t table_count,size_t repeats,
+    SubseqHash3EditResult *results,SubseqHash3PivotWorkspace *workspace) {
+    return compute_repeats_order(s,n,edits,tables,table_count,repeats,results,workspace,1);
+}
+int subseqhash3_compute_outward_pivot_seeds(const uint8_t *s,size_t n,size_t edits,
+    const SubseqHash3PivotTables *t,const size_t *pivots,size_t count,
+    SubseqHash3EditResult *results) {
+    SubseqHash3PivotWorkspace workspace={0};
+    int status=compute_pivot_seeds_impl(s,n,edits,t,pivots,count,results,&workspace,1);
+    workspace_clear(&workspace); return status;
+}
+int subseqhash3_compute_outward_pivot_repeats(const uint8_t *s,size_t n,size_t edits,
+    const SubseqHash3PivotTables *tables,size_t table_count,size_t repeats,
+    SubseqHash3EditResult *results) {
+    SubseqHash3PivotWorkspace workspace={0};
+    int status=compute_repeats_order(s,n,edits,tables,table_count,repeats,results,&workspace,1);
+    workspace_clear(&workspace); return status;
 }
 
 int subseqhash3_compute_pivot_repeats(const uint8_t *s,size_t n,size_t edits,

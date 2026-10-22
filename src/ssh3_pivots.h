@@ -6,8 +6,8 @@
 extern "C" {
 #endif
 
-/* ABC^k order family for k=n-1 output bases. Unlike the original paper,
-   sides are read from the outer boundaries toward the pivot: the left
+/* Shared ABC^k parameters for k=n-1 output bases. The inward
+   APIs read sides from the outer boundaries toward the pivot: the left
    prefix in normal order, the right suffix in reverse order. This permits
    sharing across all pivots of a single input window. */
 typedef struct {
@@ -54,6 +54,20 @@ int subseqhash3_compute_pivot_repeats_with_workspace(const uint8_t *sequence,
     size_t n,size_t substitutions,const SubseqHash3PivotTables *tables,
     size_t table_count,size_t repeats,SubseqHash3EditResult *results,
     SubseqHash3PivotWorkspace *workspace);
+
+/* Alternative outward hash family: reversed left, normal right. Exactly
+   one deletion and E substitutions, with the same table and result formats.
+   Scores and seeds differ from the inward family. Two adjacent input
+   anchors are cached; workspaces may alternate both traversals. */
+int subseqhash3_compute_outward_pivot_seeds(const uint8_t *,size_t n,
+    size_t substitutions,const SubseqHash3PivotTables *,const size_t *pivots,
+    size_t count,SubseqHash3EditResult *);
+int subseqhash3_compute_outward_pivot_repeats(const uint8_t *,size_t n,
+    size_t substitutions,const SubseqHash3PivotTables *,size_t table_count,
+    size_t repeats,SubseqHash3EditResult *);
+int subseqhash3_compute_outward_pivot_repeats_with_workspace(const uint8_t *,size_t n,
+    size_t substitutions,const SubseqHash3PivotTables *,size_t table_count,
+    size_t repeats,SubseqHash3EditResult *,SubseqHash3PivotWorkspace *);
 
 #ifdef __cplusplus
 }
