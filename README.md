@@ -1,202 +1,156 @@
 # SubseqHash3
 
-SubseqHash3 generates and evaluates DNA seeds with exact edit budgets.
-The CLI supports `simulate`, `tables`, `seeds`, `repeats`, `deletions`, `collisions`, and
-`test`; run `build/subseqhash3 --help` for usage. `repeats` exposes the pivot
-approach; the specialized one-substitution function remains a C API.
+SubseqHash3 generates multiple pivot-based DNA seeds with exact edit budgets.
+Both seeding commands use outward traversal by default; `--inward` selects
+an alternative hash order with different scores and seeds.
 
 ## Build and check
 
 ```sh
 make
-make test check-one check-pivots
+make test
 ```
 
-For AVX-512F/BW/VL hardware:
-
-```sh
-make BUILD_DIR=build/pivots-fast \
-  CFLAGS='-O3 -std=c99 -Wall -Wextra -Wpedantic -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512' \
-  test check-one check-pivots
-```
-
-The default build uses the scalar fallback. The AVX-512 build requires a
-compatible CPU and does not perform runtime CPU dispatch.
-
-## Pivot seeds from the command line
-
-Generate reusable pivot tables, then seed every length-30 window with exactly
-one deletion and five substitutions, producing ten repetitions per window:
+The normal build uses scalar kernels. For an AVX-512F/BW/VL CPU:
 
 ```sh
 make simd
-build/simd/subseqhash3 tables 30 1024 10 tables.piv --pivots --seed 42
-build/simd/subseqhash3 repeats input.seq 30 5 1024 10 seeds.csv tables.piv
+make BUILD_DIR=build/simd \
+  CFLAGS='-O3 -std=c99 -Wall -Wextra -Wpedantic -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512' test
 ```
 
-`input.seq` contains one DNA sequence per line. Alternatively, omit the last
-argument to generate tables automatically in `seeds.csv.piv`:
+The SIMD binary requires compatible hardware; there is no runtime CPU dispatch.
+All seeding is single-threaded.
+
+## Commands
+
+```text
+subseqhash3 tables W D S OUTPUT [--seed SEED]
+subseqhash3 seeds-sub INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
+subseqhash3 seeds-ind INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
+subseqhash3 collisions sub|ind PAIRS_FILE E D R S [TABLE_FILE] [--inward] [--seed SEED] [--jaccard]
+subseqhash3 simulate ...
+subseqhash3 test
+```
+
+`W` is the window length and `D` is the number of hash residues. `S` is the
+number of independent table sets. **`R` is the number of leading pivots used
+from each set**, so each window produces **R*S seeds**. Set selection and
+pivot selection are separate; increasing R does not create independent sets.
+Different orders may select the same seed string.
+
+| Command | Exact edits per window | Window limits | Pivots per set |
+|:---|:---|:---|:---|
+| `seeds-sub` | One deletion and E substitutions | 2<=W<=257; 0<=E<W | 1<=R<=W-1 |
+| `seeds-ind` | E deletions, no substitutions | 1<=W<=256; 0<=E<W | 1<=R<=W-E |
+
+Both commands select pivots 0 through R-1 from every set. Input contains one
+ACGT sequence per line, in either case; it is not FASTA/FASTQ. Every length-W
+window is emitted, advancing one base at a time. Invalid DNA, empty lines and
+sequences shorter than W are rejected.
+
+For W=30, R=5, S=3, every window produces 15 seeds: pivots 0–4 from set 0,
+then pivots 0–4 from set 1, then pivots 0–4 from set 2.
+
+## Shared tables and seeding
+
+Generate three independent table sets and reuse the same file for both modes:
 
 ```sh
-build/simd/subseqhash3 repeats input.seq 30 5 1024 10 seeds.csv
+build/subseqhash3 tables 30 1024 3 shared.piv --seed 42
+build/subseqhash3 seeds-sub input.seq 30 4 1024 5 3 sub.csv shared.piv
+build/subseqhash3 seeds-ind input.seq 30 4 1024 5 3 ind.csv shared.piv
+build/subseqhash3 seeds-sub input.seq 30 4 1024 5 3 inward.csv shared.piv --inward
 ```
 
-Both `repeats` and `deletions` use outward traversal by default, reading both
-sides away from the pivot. Add `--inward` to use the alternative inward hash
-order with different scores and seeds:
+`tables` uses W consistently with the seeding commands. Each set reserves
+min(W,256) table rows, including capacity for `seeds-ind` with E=0. The
+on-disk row-capacity header remains compatible with existing pivot files;
+older files can be reused when they contain enough rows, matching D, and at
+least S sets. If a file has extra sets, the first S are used.
+
+Omit TABLE_FILE to create `OUTPUT.piv`; add `--seed` for reproducible creation:
 
 ```sh
-build/simd/subseqhash3 repeats input.seq 30 5 1024 10 inward.csv tables.piv --inward
+build/subseqhash3 seeds-sub input.seq 30 4 1024 5 3 sub.csv --seed 42
 ```
 
-Repeats also accepts `--outward` for compatibility. To reproduce CSV output
-from the previous inward default, add `--inward` and reuse the same tables.
-The C API functions retain their existing traversal semantics.
+`--seed` applies only to table creation and cannot accompany TABLE_FILE.
+The former `seeds`, `repeats`, and `deletions` commands, `tables --pivots`,
+and the `--subseqhash2-tables` option are removed. Retained low-level C
+functions support legacy algorithms and text-table import.
 
-See the [outward repeats runtime and collision comparison](bench/REPEATS_OUTWARD.md).
+## Seeding CSV
 
-The default `tables` command still produces legacy files for `seeds` and
-`collisions`. These lack pivot parameters and cannot be used with `repeats`;
-use `--pivots` for the new format. In pivot mode, R means seed repetitions,
-requiring `ceil(R/(W-1))` independent families rather than R full table sets.
-All seeding remains single-threaded. See [CLI and table-format details](bench/REPEATS.md).
+Both commands write the same columns:
 
-## Deletion-only SubseqHash2 seeds
+```text
+set,pivot,sequence,window_start,substitutions,deletions,seed,psi,omega
+```
 
-Generate one shared table file for both mixed-edit and deletion-only seeding:
+The first four columns are zero-based. `set` identifies the independent
+tables, `pivot` is the distinguished position in the output seed, `sequence`
+identifies the input line, and `window_start` is the window offset in that
+sequence. The pivot is not the deleted position. Rows are ordered by sequence,
+window, set, then pivot. A length-L input sequence produces `(L-W+1)*R*S` rows.
+`psi` is minimized, then `omega` is maximized, with deterministic witnesses.
+
+The redundant `repeat` and `family` columns are replaced by explicit `set`
+and `pivot` columns. See [the interface guide](bench/SEEDING.md) for migration,
+C APIs, exact table requirements and examples.
+
+## Collision evaluation
 
 ```sh
-build/subseqhash3 tables 30 11 10 shared.piv --pivots --seed 42
-build/subseqhash3 repeats input.seq 30 5 11 10 mixed.csv shared.piv
-build/subseqhash3 deletions input.seq 30 5 11 10 deletions.csv shared.piv
+build/subseqhash3 collisions sub pairs.csv 4 1024 5 3 shared.piv
+build/subseqhash3 collisions ind pairs.csv 4 1024 5 3 shared.piv --inward
 ```
 
-`deletions` removes exactly E bases without substitutions and returns up to
-k=W-E seeds. Shared tables need n-1>=k and matching D; only the first family
-is used. For zero deletions, generate n>=W+1. Without a table argument,
-`deletions` creates `OUTPUT.piv`; `--seed 42` makes creation reproducible.
-Add `--inward` to use shared prefix/suffix DPs with an alternative hash order:
+Each input line contains `STRING1,STRING2`, without a header. Each string is
+seeded as one whole window using the same mode, table sets and pivot indices
+as the seeding commands. R must be valid for both strings in every pair.
+Strings may have unequal lengths; unequal output lengths cannot collide.
 
-```sh
-build/simd/subseqhash3 deletions input.seq 30 5 11 10 inward.csv shared.piv --inward
-```
+The report includes the probability of any seed-string intersection across
+all R*S seeds, any/all matching aligned `(set,pivot)` seeds, and each aligned
+set/pivot's collision probability. Independent-table trials are not pooled
+with pivot orders. `--jaccard` adds exact edit-neighborhood Jaccard statistics;
+this can be expensive. Without TABLE_FILE, tables are saved to `PAIRS_FILE.piv`.
 
-The default remains the outward SubseqHash2 order. Inward traversal changes
-scores and selected seeds; it accepts the same tables and deletion budgets.
-See the [runtime and collision comparison](bench/DELETIONS_INWARD.md).
+## C interface
 
-Original SubseqHash2 text tables remain available through
-`--subseqhash2-tables FILE`.
+Include [src/ssh3_seeding.h](src/ssh3_seeding.h) for
+`subseqhash3_seeds_sub()` and `subseqhash3_seeds_ind()`. Both accept shared
+pivot tables, R, S, and a traversal, and emit one borrowed batch of R*S
+results per window. Result index `set*R+pivot` identifies the table set and
+pivot. Passing length==W handles a single window. Result positions are
+relative to the window; add window_start for absolute positions.
+`SUBSEQHASH3_OUTWARD` is zero and `SUBSEQHASH3_INWARD` selects inward traversal.
+Both modes share outward anchor DPs across windows separately for every set.
 
-Use `make simd` and `build/simd/subseqhash3` for acceleration. The default path
-preserves the original SubseqHash2 side directions. Both traversals use compact
-costs for small table magnitudes and exact 64-bit arithmetic for wide tables. The
-mixed-edit C APIs keep their existing behavior.
-See [algorithm, API, correctness, and measured speedups](bench/DELETIONS.md).
+Use `subseqhash3_seed_tables_create()` in
+[src/pivot_table_file.h](src/pivot_table_file.h) to generate W-sized table sets.
+The older row-capacity, all-splits, single-seed and repeat-batching C APIs
+remain available with their existing semantics. They are not CLI commands.
 
-## Added APIs
+## Validation and benchmarks
 
-| API | Exact substitutions | Exact deletions | Output |
-|---|---:|---:|---|
-| `subseqhash3_compute_one_substitution()` | 1 | E | One seed of length n-E |
-| `subseqhash3_compute_pivot_seeds()` | E | 1 | Up to k=n-1 pivot orders per family |
-| `subseqhash3_compute_pivot_repeats()` | E | 1 | Any positive r, batching independent inward families |
-| `subseqhash3_compute_outward_pivot_repeats()` | E | 1 | Any positive r, batching independent outward families (CLI default) |
-| `subseqhash3_compute_deletion_seeds()` | 0 | E | Up to k=n-E original SubseqHash2 pivot orders |
-| `subseqhash3_compute_inward_deletion_seeds()` | 0 | E | Up to k=n-E inward pivot orders |
+`make test` runs scalar/SIMD kernel oracles, table round trips and malformed
+file checks, exact window equivalence, R*S callback equivalence to independent
+per-set APIs, and executable CLI tests. CLI checks cover both modes and
+traversals, table reuse, output ordering, limits, aliases and collision
+probabilities against emitted seeds.
 
-The single-seed API in `src/subseqhash3.h` uses a reduced DP with two
-substitution planes. Its SIMD path uses nonnegative cost scores, retained
-length rows, shared table vectors, and demand-driven suffix evaluation.
-It matches the corresponding result of the existing all-splits function,
-including witness tie breaking. See [single-seed details](bench/README.md).
+The existing benchmark reports retain their recorded measurements and
+historical command syntax where noted. Current examples are in
+[SEEDING.md](bench/SEEDING.md).
 
-The pivot APIs in `src/ssh3_pivots.h` share prefix/suffix DPs across orders,
-use reflected right-side residues for SIMD joins, and support optional
-workspace reuse across windows. Their orders follow the ABC^k construction
-but use boundary-to-pivot side directions, minimize psi, and maximize omega.
-They are a documented variant of the SubseqHash2 paper, not its original
-order or table-file format. See [pivot algorithm and usage](bench/PIVOTS.md).
-
-The mixed-edit APIs return encoded seeds, source positions, substitution flags, and
-scores through `SubseqHash3EditResult`. Release result contents with
-`subseqhash3_edit_results_destroy()`. Existing all-splits functions are
-unchanged. The required `src/ssh3_collisions.h` declaration is also included
-in version control so a fresh checkout can build.
-
-The deletion-only API in `src/ssh3_deletions.h` has its own tables, reusable
-workspace, and `SubseqHash3DeletionResult` with an integer omega. Free these
-results with `subseqhash3_deletion_results_destroy()`; original SubseqHash2
-text tables can be loaded with `subseqhash3_deletion_tables_import()`. Shared
-pivot families are copied with `subseqhash3_deletion_tables_from_pivots()`;
-both initializers generate the same parameters at matching row capacities.
-
-## Benchmarks and validation
-
-The dedicated checks include 365 single-seed equivalence cases and 140
-exhaustive small edit neighborhoods for the pivot algorithm, plus larger
-witnesses, score limits, workspace reuse, and repeat batching. The optimization
-benchmark adds 277 exact comparisons against its linked reference, including
-all-tied scores, unreachable residue zero, and maximum-length/cost cases.
-Standalone ASan/UBSan commands are recorded in the algorithm documents.
-The `repeats` addition also fixes the previously recorded legacy table-file
-mask-copy over-read caused by misplaced integer division. Historical optimization reports
-describe the earlier state. `make test` now includes pivot table-file and CLI
-tests; `make check-repeats` runs these independently.
-
-The requested r=10 comparison is reproducible with:
-
-```sh
-make BUILD_DIR=build/pivots-fast \
-  CFLAGS='-O3 -std=c99 -Wall -Wextra -Wpedantic -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512' \
-  build/pivots-fast/bench-pivots
-taskset -c 0 build/pivots-fast/bench-pivots --r10
-```
-
-It tests `(n,E)=(30,5)` and `(50,8)` at both D=31 and D=1024, with 32
-inputs, four loops, seven timing samples, and a warmup for every method.
-The machine must permit CPU 0 for the affinity command; substitute an
-allowed CPU otherwise. See [r=10 results and methodology](bench/R10.md).
-
-The follow-up pivot optimization preserves those exact orders and witnesses.
-For its before/after comparison against the original pivot implementation,
-see [optimization results](bench/PIVOT-OPTIMIZATION.md) and the
-`bench-pivots-speed` / `check-pivots-speed` Makefile targets. This comparison
-links the reference source from commit `ca35567` with renamed exports, so it
-requires repository history, not just a source archive.
-
-The subsequent strictly single-threaded round accelerates joins for D<=32.
-Its [before/after report](bench/PIVOT-SINGLE-THREAD.md) compares against the
-restored first optimization, using `bench-pivots-single` and
-`check-pivots-single`. It does not achieve the requested further 2.5x gain;
-D=1024 performance remains essentially unchanged.
-
-The previous API has the opposite substitution/deletion counts to the
-pivot API. Therefore their runtime comparison is not a seed-quality or
-same-edit-neighborhood comparison. The benchmark additionally reports
-separate calls to the same pivot orders as a same-problem reference.
+* [Outward single-window and long-sequence speed measurements](bench/OUTWARD_SPEED.md).
+* [Sliding-window algorithms and original measurements](bench/WINDOWS.md).
+* [Traversal optimization](bench/TRAVERSAL_OPTIMIZATION.md).
+* [Deletion algorithms and exact-score implementation](bench/DELETIONS.md).
+* [Pivot construction](bench/PIVOTS.md).
 
 The pivot construction is inspired by Xiang Li, Ke Chen, and Mingfu Shao,
 *Efficient seeding for error-prone sequences with SubseqHash2*,
 Bioinformatics 41(8), 2025, [doi:10.1093/bioinformatics/btaf418](https://doi.org/10.1093/bioinformatics/btaf418).
-
-## Long sequences and overlapping windows
-
-Both `repeats` and `deletions` seed every length-W window of each input line.
-Their outward default now caches anchor DPs across overlapping windows;
-`--inward` keeps the inward order. CSV output is unchanged for the same
-traversal, tables and parameters.
-
-The C APIs `subseqhash3_seed_repeats_windows()` and
-`subseqhash3_seed_deletion_windows()` emit one borrowed result array per
-window through a callback. They support both traversals and bound DP memory
-independently of input length. See [interfaces, sharing, runtime comparison
-and validation](bench/WINDOWS.md). `make test` includes exact window checks.
-
-## Traversal optimization results
-
-All four traversal paths are optimized, with exact seed and witness parity
-against frozen references. At D=1024 and E=4/8, speedups are 1.31–1.77× for
-deletions and 1.03–1.09× for repeats; the general 5× target remains unmet.
-For one deletion and zero substitutions at D=1024, speedups are 9.89–43.55×.
-See the [full measurements, implementation and validation](bench/TRAVERSAL_OPTIMIZATION.md).

@@ -1,4 +1,3 @@
-#include "table_file.h"
 #include "pivot_table_file.h"
 
 #include <errno.h>
@@ -16,59 +15,37 @@ static int parse_u64(const char *text,uint64_t *value) {
 }
 
 static void help(FILE *stream) {
-    fputs("Generate reusable SubseqHash3 or pivot table sets.\n\n"
-          "Usage:\n  subseqhash3 tables n D R OUTPUT [--pivots] [--seed SEED]\n\n"
-          "Arguments:\n"
-          "  n       Legacy: maximum sequence/window length.\n"
-          "          With --pivots: n-1 rows/orders per family (2<=n<=257).\n"
-          "  D       Number of hash residues.\n"
-          "  R       Legacy: number of independent table sets.\n"
-          "          With --pivots: number of requested seed repetitions.\n"
-          "  OUTPUT  Destination binary table file.\n\n"
-          "Options:\n"
-          "  --seed SEED  Use a reproducible unsigned random seed.\n"
-          "  --pivots     Shared tables for repeats/deletions: ceil(R/(n-1)) families,\n"
-          "               each containing n-1 pivot orders; requires 2<=n<=257.\n\n"
-          "repeats requires n>=W and enough families for R repetitions.\n"
-          "deletions requires n-1>=W-E, uses the first family, and R<=W-E.\n"
-          "For E=0 deletions, generate n>=W+1.\n\n"
-          "Default legacy files work with seeds/collisions. Pivot files\n"
-          "store both side tables and pivot parameters in a distinct format.\n",
-          stream);
+    fputs("Generate S independent sets of reusable pivot tables.\n\n"
+          "Usage:\n  subseqhash3 tables W D S OUTPUT [--seed SEED]\n\n"
+          "  W       Target window length, 1..257. Tables reserve min(W,256) rows.\n"
+          "  D       Positive number of hash residues.\n"
+          "  S       Positive number of independent table sets.\n"
+          "  OUTPUT  Shared binary table file for seeds-sub, seeds-ind and collisions.\n"
+          "  --seed SEED  Reproducible unsigned random seed.\n\n"
+          "Each set supplies multiple pivot orders; R is selected when seeding.\n"
+          "The extra row supports seeds-ind with zero deletions.\n",stream);
 }
 
 int ssh3_tables_main(int argc,char **argv) {
-    uint64_t n,d,r,seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
-    const char *positional[4];
-    int i,count=0,pivots=0,has_seed=0;
+    uint64_t w,d,sets,seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
+    const char *args[4]; int count=0,has_seed=0;
     if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) {
         help(stdout); return EXIT_SUCCESS;
     }
-    for (i=1;i<argc;++i) {
-        if (!strcmp(argv[i],"--pivots")) {
-            if (pivots) goto invalid;
-            pivots=1;
-        } else if (!strcmp(argv[i],"--seed")) {
+    for (int i=1;i<argc;++i) {
+        if (!strcmp(argv[i],"--seed")) {
             if (has_seed || i+1>=argc || parse_u64(argv[++i],&seed)) goto invalid;
             has_seed=1;
         } else {
-            if (count==4) goto invalid;
-            positional[count++]=argv[i];
+            if (!strncmp(argv[i],"--",2) || count==4) goto invalid;
+            args[count++]=argv[i];
         }
     }
-    if (count!=4 || parse_u64(positional[0],&n) ||
-        parse_u64(positional[1],&d) || parse_u64(positional[2],&r) ||
-        !n || !d || !r || n>SIZE_MAX || d>SIZE_MAX || r>SIZE_MAX) goto invalid;
-    if (pivots) {
-        size_t families;
-        if (n<2 || n>257) goto invalid;
-        families=1+((size_t)r-1)/((size_t)n-1);
-        return subseqhash3_pivot_table_file_create(positional[3],(size_t)n,
-            (size_t)d,families,seed)?EXIT_FAILURE:EXIT_SUCCESS;
-    }
-    return subseqhash3_table_file_create(positional[3],(size_t)n,(size_t)d,
-            (size_t)r,seed)?EXIT_FAILURE:EXIT_SUCCESS;
+    if (count!=4 || parse_u64(args[0],&w) || parse_u64(args[1],&d) ||
+        parse_u64(args[2],&sets) || w<1 || w>257 || !d || !sets ||
+        d>SIZE_MAX || sets>SIZE_MAX) goto invalid;
+    return subseqhash3_seed_tables_create(args[3],(size_t)w,(size_t)d,
+        (size_t)sets,seed)?EXIT_FAILURE:EXIT_SUCCESS;
 invalid:
-    help(stderr);
-    return EXIT_FAILURE;
+    help(stderr); return EXIT_FAILURE;
 }

@@ -1,5 +1,8 @@
 # Inward versus outward deletion seeding
 
+For the current pivot-only CLI and explicit R/S arguments, see
+[SEEDING.md](SEEDING.md). Command examples below use the historical interface.
+
 Both algorithms choose length-k subsequences with exactly E deletions and
 zero substitutions, k=n-E. The default outward order traverses each seed's
 left side in reverse and its right side in normal order. `--inward` traverses

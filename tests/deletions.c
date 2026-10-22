@@ -171,65 +171,6 @@ static void import_checks(void) {
     }
     assert(!unlink(path));
 }
-static void cli(void) {
-    char dir[]="/tmp/ssh3-deletion-cli-XXXXXX",input[256],csv[256],again[256],row[512],expected[512];
-    const uint8_t inputs[2][6]={{0,1,2,3,0,1},{3,3,2,2,1,1}};
-    SubseqHash3DeletionTables tables={0};
-    SubseqHash3DeletionResult out[3]={{0}};
-    FILE *f;
-    assert(mkdtemp(dir));
-    snprintf(input,sizeof(input),"%s/input",dir); snprintf(csv,sizeof(csv),"%s/out",dir);
-    snprintf(again,sizeof(again),"%s/again",dir);
-    f=fopen(input,"w"); assert(f); fputs("acgtac\r\nTTGGCC\n",f); assert(!fclose(f));
-    char *args[]={"deletions",input,"4","1","9","3",csv,"--seed","42"};
-    assert(!ssh3_deletions_main(9,args));
-    assert(!subseqhash3_deletion_tables_init(&tables,3,9,42));
-    f=fopen(csv,"r"); assert(f);
-    assert(fgets(row,sizeof(row),f) && !strcmp(row,"pivot,sequence,window_start,deletions,seed,psi,omega\n"));
-    for (size_t seq=0;seq<2;++seq) for (size_t start=0;start<3;++start) {
-        assert(!subseqhash3_compute_deletion_seeds(inputs[seq]+start,4,1,&tables,NULL,3,out));
-        for (size_t p=0;p<3;++p) {
-            char dna[4];
-            for (size_t j=0;j<3;++j) dna[j]="ACGT"[out[p].seed[j]];
-            dna[3]=0;
-            snprintf(expected,sizeof(expected),"%zu,%zu,%zu,1,%s,%zu,%" PRId64 "\n",p,seq,start,dna,out[p].psi,out[p].omega);
-            assert(fgets(row,sizeof(row),f) && !strcmp(row,expected));
-        }
-        subseqhash3_deletion_results_destroy(out,3);
-    }
-    assert(fgetc(f)==EOF && !ferror(f)); assert(!fclose(f));
-    char *inward_args[]={"deletions",input,"4","1","9","3",csv,"--seed","42","--inward"};
-    assert(!ssh3_deletions_main(10,inward_args));
-    f=fopen(csv,"r"); assert(f); assert(fgets(row,sizeof(row),f));
-    for (size_t seq=0;seq<2;++seq) for (size_t start=0;start<3;++start) {
-        assert(!subseqhash3_compute_inward_deletion_seeds(inputs[seq]+start,4,1,&tables,NULL,3,out));
-        for (size_t p=0;p<3;++p) {
-            char dna[4];
-            for (size_t j=0;j<3;++j) dna[j]="ACGT"[out[p].seed[j]];
-            dna[3]=0;
-            snprintf(expected,sizeof(expected),"%zu,%zu,%zu,1,%s,%zu,%" PRId64 "\n",p,seq,start,dna,out[p].psi,out[p].omega);
-            assert(fgets(row,sizeof(row),f) && !strcmp(row,expected));
-        }
-        subseqhash3_deletion_results_destroy(out,3);
-    }
-    assert(fgetc(f)==EOF && !ferror(f)); assert(!fclose(f));
-    args[6]=input; assert(ssh3_deletions_main(9,args)!=0);
-    assert(!link(input,again)); args[6]=again; assert(ssh3_deletions_main(9,args)!=0);
-    assert(!unlink(again)); args[6]=csv;
-    args[3]="4"; assert(ssh3_deletions_main(9,args)!=0); args[3]="1";
-    args[5]="4"; assert(ssh3_deletions_main(9,args)!=0); args[5]="3";
-    args[4]="-1"; assert(ssh3_deletions_main(9,args)!=0); args[4]="9";
-    args[8]="-1"; assert(ssh3_deletions_main(9,args)!=0); args[8]="42";
-    f=fopen(input,"w"); assert(f); fputs("ACNT\n",f); assert(!fclose(f));
-    assert(ssh3_deletions_main(9,args)!=0);
-    f=fopen(input,"w"); assert(f); fputs("AC\n",f); assert(!fclose(f));
-    assert(ssh3_deletions_main(9,args)!=0);
-    f=fopen(input,"w"); assert(f); fputs("\n",f); assert(!fclose(f));
-    assert(ssh3_deletions_main(9,args)!=0);
-    subseqhash3_deletion_tables_destroy(&tables);
-    snprintf(row,sizeof(row),"%s.piv",csv); assert(!unlink(row));
-    assert(!unlink(csv)); assert(!unlink(input)); assert(!rmdir(dir));
-}
 static void compare_parameters(const SubseqHash3PivotTables *p,const SubseqHash3DeletionTables *t) {
     assert(p->k==t->k && p->d==t->d);
     for (size_t i=0;i<4*t->k*t->d;++i) {
@@ -243,113 +184,8 @@ static void compare_parameters(const SubseqHash3PivotTables *p,const SubseqHash3
         assert(t->left_sign[i]==p->pivot_left_sign[i] && t->right_sign[i]==p->pivot_right_sign[i]);
     }
 }
-static void compare_files(const char *a,const char *b) {
-    FILE *x=fopen(a,"rb"),*y=fopen(b,"rb"); int c;
-    assert(x && y);
-    do { c=fgetc(x); assert(c==fgetc(y)); } while (c!=EOF);
-    assert(!ferror(x) && !ferror(y)); assert(!fclose(x) && !fclose(y));
-}
-static void put(const char *path,const char *text) {
-    FILE *f=fopen(path,"w"); assert(f); assert(fputs(text,f)>=0); assert(!fclose(f));
-}
 static void shared_tables(void) {
-    char dir[]="/tmp/ssh3-shared-pivots-XXXXXX",input[256],file[256],csv[256],auto_csv[256];
-    char repeat_csv[256],auto_file[300],other[256],expected[512],row[512];
-    const uint8_t encoded[8]={0,1,2,3,0,1,2,3};
-    SubseqHash3PivotTableFile shared={0};
     SubseqHash3DeletionTables t={0};
-    SubseqHash3DeletionResult result[4]={{0}};
-    FILE *f;
-    assert(mkdtemp(dir));
-#define PATH(NAME,SUFFIX) assert(snprintf(NAME,sizeof(NAME),"%s/%s",dir,SUFFIX)>0)
-    PATH(input,"dna"); PATH(file,"tables.piv"); PATH(csv,"deletions.csv");
-    PATH(auto_csv,"auto.csv"); PATH(repeat_csv,"repeats.csv"); PATH(other,"other");
-#undef PATH
-    snprintf(auto_file,sizeof(auto_file),"%s.piv",auto_csv);
-    put(input,"ACGTACGT\n");
-    char *make[]={"tables","6","31","2",file,"--pivots","--seed","42"};
-    char *del[]={"deletions",input,"6","2","31","4",csv,file};
-    char *repeat[]={"repeats",input,"6","0","31","2",repeat_csv,file};
-    char *automatic[]={"deletions",input,"6","2","31","4",auto_csv,"--seed","42"};
-    assert(!ssh3_tables_main(8,make));
-    assert(!subseqhash3_pivot_table_file_open(&shared,file));
-    assert(!subseqhash3_deletion_tables_init(&t,5,31,42));
-    compare_parameters(shared.tables,&t);
-    subseqhash3_deletion_tables_destroy(&t);
-    assert(!subseqhash3_deletion_tables_from_pivots(&t,shared.tables));
-    compare_parameters(shared.tables,&t);
-    /* Copies own their data, including after the shared file is closed. */
-    subseqhash3_pivot_table_file_close(&shared);
-    assert(!ssh3_deletions_main(8,del));
-    assert(!ssh3_repeats_main(8,repeat));
-    f=fopen(csv,"r"); assert(f); assert(fgets(row,sizeof(row),f));
-    for (size_t start=0;start<3;++start) {
-        assert(!subseqhash3_compute_deletion_seeds(encoded+start,6,2,&t,NULL,4,result));
-        for (size_t p=0;p<4;++p) {
-            char dna[5];
-            for (size_t j=0;j<4;++j) dna[j]="ACGT"[result[p].seed[j]];
-            dna[4]=0;
-            snprintf(expected,sizeof(expected),"%zu,0,%zu,2,%s,%zu,%" PRId64 "\n",p,start,dna,result[p].psi,result[p].omega);
-            assert(fgets(row,sizeof(row),f) && !strcmp(row,expected));
-        }
-        subseqhash3_deletion_results_destroy(result,4);
-    }
-    assert(fgetc(f)==EOF && !ferror(f)); assert(!fclose(f));
-    subseqhash3_deletion_tables_destroy(&t);
-    assert(!ssh3_deletions_main(9,automatic));
-    compare_files(csv,auto_csv); compare_files(file,auto_file);
-    del[6]=auto_csv; del[7]=auto_file; assert(!ssh3_deletions_main(8,del));
-    compare_files(csv,auto_csv);
-    repeat[7]=auto_file; repeat[6]=other; assert(!ssh3_repeats_main(8,repeat));
-    compare_files(repeat_csv,other);
-    del[6]=csv; del[7]=file;
-    /* Reject incompatible dimensions before truncating an existing output. */
-    put(csv,"KEEP\n"); put(other,"KEEP\n");
-    del[3]="0"; assert(ssh3_deletions_main(8,del)!=0); compare_files(csv,other);
-    del[3]="2"; del[4]="32"; assert(ssh3_deletions_main(8,del)!=0); compare_files(csv,other);
-    del[4]="31"; del[6]=file; assert(ssh3_deletions_main(8,del)!=0); del[6]=csv;
-    /* Automatic generation must also protect INPUT through a hard link. */
-    assert(!unlink(auto_file)); assert(!link(input,auto_file));
-    assert(ssh3_deletions_main(9,automatic)!=0); assert(!unlink(auto_file));
-    /* A dangling OUTPUT symlink must not truncate its newly created table. */
-    assert(!unlink(auto_csv)); assert(!symlink(auto_file,auto_csv));
-    assert(ssh3_deletions_main(9,automatic)!=0);
-    assert(!subseqhash3_pivot_table_file_open(&shared,auto_file));
-    subseqhash3_pivot_table_file_close(&shared); assert(!unlink(auto_csv));
-    /* Zero deletions need W rows, so automatic generation reserves n=W+1. */
-    automatic[3]="0"; assert(!ssh3_deletions_main(9,automatic));
-    assert(!subseqhash3_pivot_table_file_open(&shared,auto_file));
-    assert(shared.n==7); subseqhash3_pivot_table_file_close(&shared);
-    del[3]="0"; del[7]=auto_file; assert(!ssh3_deletions_main(8,del)); compare_files(csv,auto_csv);
-    /* Capacity depends on OUTPUT length, not the input-window length. */
-    make[1]="2"; make[3]="1"; assert(!ssh3_tables_main(8,make));
-    del[3]="5"; del[5]="1"; del[7]=file; assert(!ssh3_deletions_main(8,del));
-    /* Wrong-format files fail before opening OUTPUT. */
-    put(csv,"KEEP\n"); put(other,"KEEP\n"); put(file,"bad\n");
-    assert(ssh3_deletions_main(8,del)!=0); compare_files(csv,other);
-    assert(!subseqhash3_table_file_create(file,6,31,1,42));
-    assert(ssh3_deletions_main(8,del)!=0); compare_files(csv,other);
-    /* Text import is available only through the explicit option. */
-    put(file,"1 1 1 1\n1,1 1,1 1,1 1,1\n0 0 0 0\n"
-             "1 1 1 1\n1,1 1,1 1,1 1,1\n0 0 0 0\n"
-             "1,1 1,1 1,1 1,1\n1 1 1 1\n1 1 1 1\n0 0 0 0\n0\n");
-    char *text[]={"deletions",input,"6","5","1","1",csv,"--subseqhash2-tables",file};
-    assert(!ssh3_deletions_main(9,text));
-    text[8]="--seed"; assert(ssh3_deletions_main(8,text)!=0);
-    /* Automatic capacity at both ends of the supported window range. */
-    {
-        char sequence[257]; memset(sequence,'A',256); sequence[256]=0; put(input,sequence);
-        automatic[2]="256"; automatic[3]="0"; automatic[4]="1"; automatic[5]="1";
-        assert(!ssh3_deletions_main(9,automatic));
-        assert(!subseqhash3_pivot_table_file_open(&shared,auto_file) && shared.n==257);
-        subseqhash3_pivot_table_file_close(&shared);
-        automatic[2]="1"; assert(!ssh3_deletions_main(9,automatic));
-        assert(!subseqhash3_pivot_table_file_open(&shared,auto_file) && shared.n==2);
-        subseqhash3_pivot_table_file_close(&shared);
-    }
-    assert(!unlink(input)); assert(!unlink(csv)); assert(!unlink(file));
-    assert(!unlink(auto_csv)); assert(!unlink(auto_file)); assert(!unlink(other));
-    assert(!unlink(repeat_csv)); assert(!rmdir(dir));
     /* Generator/conversion parity at minimum and maximum row capacities. */
     for (size_t k=1;k<=256;k+=255) {
         SubseqHash3PivotTables p={0};
@@ -457,9 +293,9 @@ int main(void) {
     compact_wide_kernels_parity();
     inward_repeats_parity();
     import_checks();
-    cli();
+
     shared_tables();
     subseqhash3_deletion_workspace_destroy(w);
-    printf("%zu exhaustive cases per traversal (inward and outward) plus large witnesses, ties, unreachable zero, workspace reuse, shared tables, CSV/API equivalence and invalid arguments passed\n",cases);
+    printf("%zu exhaustive cases per traversal (inward and outward) plus large witnesses, ties, unreachable zero, workspace reuse, shared tables and invalid arguments passed\n",cases);
     return 0;
 }

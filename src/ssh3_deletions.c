@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200112L
 #include "ssh3_deletions.h"
+#include "ssh3_seeding.h"
 #include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
@@ -1281,74 +1282,125 @@ int subseqhash3_compute_deletion_seeds(const uint8_t *s,size_t n,size_t e,
     subseqhash3_deletion_workspace_destroy(w); return status;
 }
 
-int subseqhash3_seed_deletion_windows(const uint8_t *s,size_t length,size_t n,
-    size_t e,const SubseqHash3DeletionTables *t,size_t count,
-    SubseqHash3Traversal traversal,SubseqHash3DeletionWindowCallback callback,
-    void *context) {
-    SubseqHash3DeletionWorkspace *w=NULL;
+/* One cache/workspace per independent set; step all sets before emitting a
+   window so callbacks always see a complete set-major R*S batch. */
+typedef struct {
+    SubseqHash3DeletionWorkspace *w;
+    DeletionWindowCache *cache;
+    SubseqHash3DeletionWorkspace prepared_left,prepared_right;
+    const SubseqHash3DeletionTables *tables;
+    SubseqHash3DeletionResult *out;
+    size_t slots,count,n,e;
+    int shared,inward;
+} DeletionWindowEngine;
+
+static void window_engine_destroy(DeletionWindowEngine *v) {
+    if (v->cache) for (size_t j=0;j<v->slots;++j) {
+        free(v->cache[j].left.low); free(v->cache[j].right.low);
+    }
+    free(v->cache);
+    free(v->prepared_left.packed_A); free(v->prepared_left.inward_masks);
+    free(v->prepared_right.packed_A); free(v->prepared_right.inward_masks);
+    subseqhash3_deletion_workspace_destroy(v->w);
+}
+
+static int window_engine_init(DeletionWindowEngine *v,const uint8_t *s,
+    size_t length,size_t n,size_t e,const SubseqHash3DeletionTables *t,
+    size_t count,SubseqHash3DeletionResult *out,SubseqHash3Traversal traversal) {
+    v->tables=t; v->out=out; v->count=count; v->n=n; v->e=e;
+    v->inward=traversal==SUBSEQHASH3_INWARD;
+    v->w=subseqhash3_deletion_workspace_create();
+    if (!v->w || compute_deletion_seeds(s,n,e,t,NULL,count,out,v->w,v->inward)) return -1;
+    v->shared=!v->inward && length>n && e && n-e>1 &&
+        !(e==1 && t->d>=128 && t->d>=8*n);
+    if (v->shared) for (size_t j=0;j<4*(n-e-1)*t->d;++j)
+        if (t->left.A[j]<-127 || t->left.A[j]>127 ||
+            t->right.A[j]<-127 || t->right.A[j]>127) { v->shared=0; break; }
+    if (v->shared) {
+        v->prepared_left.d=v->prepared_right.d=t->d;
+        if (t->d>1 && (prepare_inward(&v->prepared_left,&t->left,count-1,1) ||
+            prepare_inward(&v->prepared_right,&t->right,n-e-1,0))) return -1;
+        v->slots=count+e; v->cache=calloc(v->slots,sizeof(*v->cache));
+        if (!v->cache) return -1;
+        for (size_t j=0;j<v->slots;++j) v->cache[j].anchor=SIZE_MAX;
+        v->w->window_cache=v->cache; v->w->window_slots=v->slots;
+    }
+    return 0;
+}
+
+static int window_engine_step(DeletionWindowEngine *v,const uint8_t *s,
+    size_t length,size_t start) {
+    SubseqHash3DeletionWorkspace *w=v->w;
+    const SubseqHash3DeletionTables *t=v->tables;
+    const size_t n=v->n,e=v->e;
+    if (!v->shared) return compute_deletion_seeds(s+start,n,e,t,NULL,v->count,v->out,w,v->inward);
+    w->window_start=start;
+    for (size_t i=0;i<v->slots;++i) {
+        const size_t anchor=start+i;
+        DeletionWindowCache *c=v->cache+anchor%v->slots;
+        if (c->anchor!=anchor) {
+            uint8_t input[256]={0};
+            for (size_t l=1;l<n && l<=anchor;++l) input[l-1]=s[anchor-l];
+            if (build_inward(w,&c->left,input,&t->left,v->count-1,1,&v->prepared_left)) return -1;
+            memset(input,0,n);
+            for (size_t l=1;l<n && l<length-anchor;++l) input[n-l]=s[anchor+l];
+            if (build_inward(w,&c->right,input,&t->right,n-e-1,0,&v->prepared_right)) return -1;
+            c->anchor=anchor;
+        }
+    }
+    return compute_compact_seeds(s+start,t,NULL,v->count,v->out,w,0,0,1);
+}
+
+static int seed_ind_windows(const uint8_t *s,size_t length,size_t n,size_t e,
+    const SubseqHash3DeletionTables *tables,size_t count,size_t sets,
+    SubseqHash3Traversal traversal,SubseqHash3DeletionWindowCallback callback,void *context) {
+    DeletionWindowEngine *engines=NULL;
     SubseqHash3DeletionResult *out=NULL;
-    DeletionWindowCache *cache=NULL;
-    size_t slots=0;
-    SubseqHash3DeletionWorkspace prepared_left={0},prepared_right={0};
-    int status=-1,shared=0;
-    if (!s || !t || !callback || !n || n>256 || length<n || e>=n ||
-        !count || count>n-e ||
+    int status=-1;
+    if (!s || !tables || !callback || !n || n>256 || length<n || e>=n ||
+        !count || count>n-e || !sets || sets>SIZE_MAX/count ||
+        sets>SIZE_MAX/sizeof(*engines) || count*sets>SIZE_MAX/sizeof(*out) ||
         (traversal!=SUBSEQHASH3_OUTWARD && traversal!=SUBSEQHASH3_INWARD)) return -1;
     for (size_t j=0;j<length;++j) if (s[j]>3) return -1;
-    w=subseqhash3_deletion_workspace_create(); out=calloc(count,sizeof(*out));
-    if (!w || !out) goto done;
-    /* Validate with the existing solver, retaining all supported wide-table
-       and direct-solver fallbacks. Do not emit anything for invalid tables. */
-    if (compute_deletion_seeds(s,n,e,t,NULL,count,out,w,traversal==SUBSEQHASH3_INWARD)) goto done;
-    if (callback(0,out,count,context)) goto done;
-    subseqhash3_deletion_results_destroy(out,count);
-    if (length==n) { status=0; goto done; }
-    shared=traversal==SUBSEQHASH3_OUTWARD && e && n-e>1 &&
-        !(e==1 && t->d>=128 && t->d>=8*n);
-    if (shared) {
-        /* Wide magnitudes keep the exact int64 single-window path. */
-        const size_t maximum=n-e-1;
-        for (size_t j=0;j<4*maximum*t->d;++j)
-            if (t->left.A[j]<-127 || t->left.A[j]>127 ||
-                t->right.A[j]<-127 || t->right.A[j]>127) { shared=0; break; }
-    }
-    if (shared) {
-        prepared_left.d=prepared_right.d=t->d;
-        if (t->d>1 && (prepare_inward(&prepared_left,&t->left,count-1,1) ||
-            prepare_inward(&prepared_right,&t->right,n-e-1,0))) goto done;
-        slots=count+e; cache=calloc(slots,sizeof(*cache));
-        if (!cache) goto done;
-        for (size_t j=0;j<slots;++j) cache[j].anchor=SIZE_MAX;
-        w->window_cache=cache; w->window_slots=slots;
-    }
-    for (size_t start=1;start<=length-n;++start) {
-        if (shared) {
-            w->window_start=start;
-            for (size_t i=0;i<slots;++i) {
-                const size_t anchor=start+i;
-                DeletionWindowCache *c=cache+anchor%slots;
-                if (c->anchor!=anchor) {
-                    uint8_t input[256]={0};
-                    for (size_t l=1;l<n && l<=anchor;++l) input[l-1]=s[anchor-l];
-                    if (build_inward(w,&c->left,input,&t->left,count-1,1,&prepared_left)) goto done;
-                    memset(input,0,n);
-                    for (size_t l=1;l<n && l<length-anchor;++l) input[n-l]=s[anchor+l];
-                    if (build_inward(w,&c->right,input,&t->right,n-e-1,0,&prepared_right)) goto done;
-                    c->anchor=anchor;
-                }
-            }
-            if (compute_compact_seeds(s+start,t,NULL,count,out,w,0,0,1)) goto done;
-        } else if (compute_deletion_seeds(s+start,n,e,t,NULL,count,out,w,
-                traversal==SUBSEQHASH3_INWARD)) goto done;
-        if (callback(start,out,count,context)) goto done;
-        subseqhash3_deletion_results_destroy(out,count);
+    out=calloc(count*sets,sizeof(*out)); engines=calloc(sets,sizeof(*engines));
+    if (!out || !engines) goto done;
+    for (size_t f=0;f<sets;++f)
+        if (window_engine_init(engines+f,s,length,n,e,tables+f,count,out+f*count,traversal)) goto done;
+    for (size_t start=0;start<=length-n;++start) {
+        if (start) for (size_t f=0;f<sets;++f)
+            if (window_engine_step(engines+f,s,length,start)) goto done;
+        if (callback(start,out,count*sets,context)) goto done;
+        subseqhash3_deletion_results_destroy(out,count*sets);
     }
     status=0;
 done:
-    if (cache) for (size_t j=0;j<slots;++j) { free(cache[j].left.low); free(cache[j].right.low); }
-    free(prepared_left.packed_A); free(prepared_left.inward_masks);
-    free(prepared_right.packed_A); free(prepared_right.inward_masks);
-    free(cache); subseqhash3_deletion_results_destroy(out,out?count:0); free(out);
-    subseqhash3_deletion_workspace_destroy(w);
+    if (engines) for (size_t f=0;f<sets;++f) window_engine_destroy(engines+f);
+    free(engines); subseqhash3_deletion_results_destroy(out,out?count*sets:0); free(out);
     return status;
+}
+
+int subseqhash3_seed_deletion_windows(const uint8_t *s,size_t length,size_t n,
+    size_t e,const SubseqHash3DeletionTables *tables,size_t count,
+    SubseqHash3Traversal traversal,SubseqHash3DeletionWindowCallback callback,void *context) {
+    return seed_ind_windows(s,length,n,e,tables,count,1,traversal,callback,context);
+}
+
+int subseqhash3_seeds_ind(const uint8_t *s,size_t length,size_t n,size_t e,
+    const SubseqHash3PivotTables *tables,size_t r,size_t sets,
+    SubseqHash3Traversal traversal,SubseqHash3IndSeedsCallback callback,void *context) {
+    SubseqHash3DeletionTables *converted=NULL;
+    int status=-1;
+    if (!s || !tables || !callback || !sets || sets>SIZE_MAX/sizeof(*converted) || !r ||
+        sets>SIZE_MAX/r || r*sets>SIZE_MAX/sizeof(SubseqHash3DeletionResult) ||
+        !n || n>256 || length<n || e>=n || r>n-e ||
+        (traversal!=SUBSEQHASH3_OUTWARD && traversal!=SUBSEQHASH3_INWARD)) return -1;
+    converted=calloc(sets,sizeof(*converted));
+    if (!converted) return -1;
+    for (size_t f=0;f<sets;++f) {
+        if (tables[f].k<n-e || subseqhash3_deletion_tables_from_pivots(converted+f,tables+f)) goto done;
+    }
+    status=seed_ind_windows(s,length,n,e,converted,r,sets,traversal,callback,context);
+done:
+    for (size_t f=0;f<sets;++f) subseqhash3_deletion_tables_destroy(converted+f);
+    free(converted); return status;
 }

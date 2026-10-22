@@ -19,7 +19,8 @@ typedef struct {
     uint32_t *right_reversed_B1_masks;
 } SubseqHash3PivotTables;
 
-/* CLI and long-sequence APIs default to outward. Single-window APIs retain
+/* New pivot-only CLI and R/S APIs are declared in ssh3_seeding.h.
+   CLI and long-sequence APIs default to outward. Single-window APIs retain
    the traversal named/documented by each function. */
 typedef enum {
     SUBSEQHASH3_OUTWARD=0,

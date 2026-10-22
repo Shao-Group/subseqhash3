@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200112L
 #include "ssh3_pivots.h"
+#include "ssh3_seeding.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -1021,9 +1022,9 @@ int subseqhash3_compute_pivot_repeats(const uint8_t *s,size_t n,size_t edits,
     return status;
 }
 
-int subseqhash3_seed_repeats_windows(const uint8_t *s,size_t length,size_t n,
+static int seed_sub_windows(const uint8_t *s,size_t length,size_t n,
     size_t edits,const SubseqHash3PivotTables *tables,size_t table_count,
-    size_t repeats,SubseqHash3Traversal traversal,
+    size_t repeats,size_t per_set,SubseqHash3Traversal traversal,
     SubseqHash3RepeatsWindowCallback callback,void *context) {
     SubseqHash3PivotWorkspace w={0};
     RepeatWindowCache *caches=NULL;
@@ -1032,9 +1033,9 @@ int subseqhash3_seed_repeats_windows(const uint8_t *s,size_t length,size_t n,
     int status=-1;
     const int shared=traversal==SUBSEQHASH3_OUTWARD && length>n;
     if (!s || !tables || !callback || n<2 || n>257 || length<n || edits>=n ||
-        !repeats || repeats>SIZE_MAX/sizeof(*results) ||
+        !repeats || !per_set || per_set>n-1 || repeats>SIZE_MAX/sizeof(*results) ||
         (traversal!=SUBSEQHASH3_OUTWARD && traversal!=SUBSEQHASH3_INWARD)) return -1;
-    families=1+(repeats-1)/(n-1);
+    families=1+(repeats-1)/per_set;
     if (table_count<families || families>SIZE_MAX/sizeof(*caches)) return -1;
     for (size_t j=0;j<length;++j) if (s[j]>3) return -1;
     for (size_t f=0;f<families;++f)
@@ -1044,7 +1045,7 @@ int subseqhash3_seed_repeats_windows(const uint8_t *s,size_t length,size_t n,
     if (!results || !caches) goto done;
     if (shared) for (size_t f=0;f<families;++f) {
         RepeatWindowCache *c=caches+f;
-        size_t count=repeats-f*(n-1); if (count>n-1) count=n-1;
+        size_t count=repeats-f*per_set; if (count>per_set) count=per_set;
         c->slots=count+1;
         c->left=calloc(c->slots,sizeof(*c->left));
         c->right=calloc(c->slots,sizeof(*c->right));
@@ -1056,8 +1057,8 @@ int subseqhash3_seed_repeats_windows(const uint8_t *s,size_t length,size_t n,
     for (size_t start=0;start<=length-n;++start) {
         w.window_start=start;
         for (size_t f=0;f<families;++f) {
-            const size_t first=f*(n-1);
-            size_t count=repeats-first; if (count>n-1) count=n-1;
+            const size_t first=f*per_set;
+            size_t count=repeats-first; if (count>per_set) count=per_set;
             w.window_cache=shared?caches+f:NULL;
             if (compute_pivot_seeds_impl(s+start,n,edits,tables+f,NULL,count,
                     results+first,&w,traversal==SUBSEQHASH3_OUTWARD)) goto done;
@@ -1079,4 +1080,32 @@ done:
     }
     free(caches); workspace_clear(&w);
     return status;
+}
+
+int subseqhash3_seed_repeats_windows(const uint8_t *s,size_t length,size_t n,
+    size_t edits,const SubseqHash3PivotTables *tables,size_t table_count,
+    size_t repeats,SubseqHash3Traversal traversal,
+    SubseqHash3RepeatsWindowCallback callback,void *context) {
+    return seed_sub_windows(s,length,n,edits,tables,table_count,repeats,n?n-1:0,
+        traversal,callback,context);
+}
+
+int subseqhash3_seeds_sub(const uint8_t *s,size_t length,size_t n,
+    size_t edits,const SubseqHash3PivotTables *tables,size_t r,size_t sets,
+    SubseqHash3Traversal traversal,SubseqHash3SubSeedsCallback callback,void *context) {
+    if (!s || !tables || !callback || n<2 || n>257 || length<n || edits>=n ||
+        !r || r>n-1 || !sets || sets>SIZE_MAX/r ||
+        r*sets>SIZE_MAX/sizeof(SubseqHash3EditResult) ||
+        (traversal!=SUBSEQHASH3_OUTWARD && traversal!=SUBSEQHASH3_INWARD)) return -1;
+    for (size_t f=0;f<sets;++f) {
+        const SubseqHash3PivotTables *t=tables+f;
+        if (t->k<n-1 || !t->d || t->left.k<t->k || t->right.k<t->k ||
+            t->left.d!=t->d || t->right.d!=t->d ||
+            !t->left.signed_A || !t->right.signed_A || !t->left.B1 || !t->right.B1 ||
+            !t->left.C || !t->right.C || !t->left.B1_masks || !t->right.B1_masks ||
+            !t->right_reversed_A || !t->right_reversed_B1_masks ||
+            !t->pivot_A || !t->pivot_C || !t->pivot_left_sign || !t->pivot_right_sign) return -1;
+    }
+    return seed_sub_windows(s,length,n,edits,tables,sets,r*sets,r,
+        traversal,callback,context);
 }

@@ -1,5 +1,8 @@
 # Single-thread traversal optimization
 
+For the current pivot-only CLI and explicit R/S arguments, see
+[SEEDING.md](SEEDING.md). Command examples below use the historical interface.
+
 All four paths have been optimized while preserving the existing hash
 families, scores, selected seeds and deterministic tie witnesses. The broad
 5x target is **not achieved on the earlier D=1024, E=4/8 workloads**. It is

@@ -1,5 +1,8 @@
 # Repeats traversal comparison across residue counts
 
+For the current pivot-only CLI and explicit R/S arguments, see
+[SEEDING.md](SEEDING.md). Command examples below use the historical interface.
+
 This repeats the [inward/outward repeats experiment](REPEATS_OUTWARD.md) at
 D=32, 128, 1024 and 2048. Both algorithms retain n-1 bases, with exactly
 one deletion and E substitutions. Configurations are (n,E,R)=(30,4,10),

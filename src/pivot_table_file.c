@@ -81,6 +81,12 @@ static int write_family(FILE *out,const SubseqHash3PivotTables *t) {
     return 0;
 }
 
+int subseqhash3_seed_tables_create(const char *path,size_t window,size_t d,
+    size_t sets,uint64_t seed) {
+    if (!window || window>257) return -1;
+    return subseqhash3_pivot_table_file_create(path,window<257?window+1:257,d,sets,seed);
+}
+
 int subseqhash3_pivot_table_file_create(const char *path,size_t n,size_t d,
     size_t count,uint64_t seed) {
     unsigned char header[PIVOT_HEADER]={0};

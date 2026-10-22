@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
-#include "table_file.h"
+#include "ssh3_seeding.h"
+#include "ssh3_cli.h"
 #include "ssh3_collisions.h"
 
 #include <errno.h>
@@ -125,38 +126,6 @@ double ssh3_edit_neighborhood_jaccard(const char *s,const char *t,size_t es,size
     return union_size?(double)(intersection/union_size):1.0;
 }
 
-static double seconds(clockid_t clock_id) {
-    struct timespec value;
-    if (clock_gettime(clock_id,&value)) return 0.0;
-    return (double)value.tv_sec+(double)value.tv_nsec*1e-9;
-}
-
-static int parse_size(const char *text,size_t *value) {
-    char *end; unsigned long long parsed;
-    errno=0; parsed=strtoull(text,&end,10);
-    if (errno || !*text || *end || parsed>(unsigned long long)SIZE_MAX)
-        return -1;
-    *value=(size_t)parsed; return 0;
-}
-
-static void help(FILE *stream) {
-    fputs("Estimate SubseqHash3 seed-collision probabilities from DNA pairs.\n\n"
-          "Usage:\n  subseqhash3 collisions PAIRS_FILE E D R [TABLE_FILE] [--jaccard]\n\n"
-          "Arguments:\n"
-          "  PAIRS_FILE  CSV input with one STRING1,STRING2 pair per line.\n"
-          "               Strings in a pair may have different lengths.\n"
-          "  E           Edit budget applied independently to each string.\n"
-          "  D           Number of hash residues.\n"
-          "  R           Number of table sets and repeated trials.\n"
-          "  TABLE_FILE  Optional reusable table file matching D and R.\n\n"
-          "Options:\n"
-          "  --jaccard   Compute and output edit-neighborhood Jaccard statistics.\n"
-          "               Disabled by default because this calculation is slow.\n\n"
-          "Only left/right edit splits producing equal-length seeds are compared.\n"
-          "If TABLE_FILE is omitted, new tables are written to PAIRS_FILE.ABC.\n",
-          stream);
-}
-
 static void trim(char *line,size_t *length) {
     while (*length && (line[*length-1]=='\n' || line[*length-1]=='\r'))
         line[--*length]='\0';
@@ -186,219 +155,145 @@ static int parse_pair(char *line,size_t length,char **left,size_t *left_length,
     return 0;
 }
 
-static int scan_input(const char *filename,size_t edits,size_t *maximum_length,
-                      size_t *pair_count) {
-    FILE *input=fopen(filename,"r");
-    char *line=NULL; size_t capacity=0,line_number=0;
-    ssize_t read; int status=-1;
-    if (!input) { perror(filename); return -1; }
-    *maximum_length=0; *pair_count=0;
-    while ((read=getline(&line,&capacity,input))>=0) {
-        char *left,*right; size_t n1,n2,difference;
-        ++line_number;
-        if (parse_pair(line,(size_t)read,&left,&n1,&right,&n2)) {
-            fprintf(stderr,"invalid pair on line %zu of %s\n",line_number,filename);
-            goto done;
-        }
-        difference=n1>n2?n1-n2:n2-n1;
-        if (n1<edits || n2<edits) {
-            fprintf(stderr,"line %zu of %s contains a string shorter than E=%zu\n",
-                    line_number,filename,edits);
-            goto done;
-        }
-        if (difference>edits) {
-            fprintf(stderr,"line %zu of %s has length difference %zu, greater than E=%zu\n",
-                    line_number,filename,difference,edits);
-            goto done;
-        }
-        if (n1>*maximum_length) *maximum_length=n1;
-        if (n2>*maximum_length) *maximum_length=n2;
-        ++*pair_count;
-    }
-    if (ferror(input)) { perror(filename); goto done; }
-    if (!*pair_count) { fprintf(stderr,"%s contains no pairs\n",filename); goto done; }
-    status=0;
-done:
-    free(line); fclose(input); return status;
-}
 
-static int encode(const char *text,size_t length,uint8_t *sequence) {
-    size_t i;
-    for (i=0;i<length;++i) {
-        switch (text[i]) {
-        case 'A': case 'a': sequence[i]=0; break;
-        case 'C': case 'c': sequence[i]=1; break;
-        case 'G': case 'g': sequence[i]=2; break;
-        default: sequence[i]=3; break;
-        }
-    }
+typedef struct {
+    size_t count;
+    uint8_t **seed;
+    size_t *length;
+} SeedBatch;
+static void batch_free(SeedBatch *a) {
+    if (a->seed) for (size_t i=0;i<a->count;++i) free(a->seed[i]);
+    free(a->seed); free(a->length); memset(a,0,sizeof(*a));
+}
+static int batch_copy(SeedBatch *a,size_t i,const uint8_t *seed,size_t length) {
+    a->seed[i]=malloc(length); if (!a->seed[i]) return -1;
+    memcpy(a->seed[i],seed,length); a->length[i]=length; return 0;
+}
+static int collect_sub(size_t start,const SubseqHash3EditResult *seeds,size_t count,void *ctx) {
+    SeedBatch *a=ctx; (void)start;
+    for (size_t i=0;i<count;++i) if (batch_copy(a,i,seeds[i].seed,seeds[i].length)) return -1;
     return 0;
 }
-
-static int estimate(const char *filename,size_t edits,size_t d,size_t repeats,
-                    size_t maximum_length,size_t expected_pairs,
-                    const SubseqHash3TableFile *table_file,int compute_jaccard) {
-    const size_t per=edits+1;
-    FILE *input=fopen(filename,"r");
-    char *line=NULL; size_t capacity=0,repeat,left_split,right_split;
-    double pairs_sum=0,any_sum=0,all_sum=0,wall_sum=0,cpu_sum=0;
-    double *collisions=NULL,*denominators=NULL,*jaccard_sum=NULL,*jaccard_sq_sum=NULL;
-    int status=-1;
-    if (!input) { perror(filename); return -1; }
-    if (per>SIZE_MAX/per || per*per>SIZE_MAX/sizeof(*collisions)) goto done;
-    collisions=calloc(per*per,sizeof(*collisions));
-    denominators=calloc(per*per,sizeof(*denominators));
-    if (compute_jaccard) {
-        jaccard_sum=calloc(per,sizeof(*jaccard_sum));
-        jaccard_sq_sum=calloc(per,sizeof(*jaccard_sq_sum));
-    }
-    if (!collisions || !denominators ||
-        (compute_jaccard && (!jaccard_sum || !jaccard_sq_sum))) goto done;
-
-    for (repeat=0;repeat<repeats;++repeat) {
-        const SubseqHash3Tables *tables=table_file->tables+repeat;
-        size_t pairs=0,any_collisions=0,all_collisions=0;
-        double wall_start=seconds(CLOCK_MONOTONIC);
-        double cpu_start=seconds(CLOCK_PROCESS_CPUTIME_ID);
-        ssize_t read;
-        rewind(input); clearerr(input);
-        while ((read=getline(&line,&capacity,input))>=0) {
-            char *left_text,*right_text; size_t n1,n2,compatible=0;
-            uint8_t *s1=NULL,*s2=NULL;
-            SubseqHash3EditResult *left=NULL,*right=NULL;
-            int any=0,all=1;
-            if (parse_pair(line,(size_t)read,&left_text,&n1,&right_text,&n2))
-                goto repeat_failed;
-            /* The edit neighborhoods do not depend on the random hash tables.
-             * Compute each input pair once, then weight it by the repeat count
-             * when reporting statistics over all pair/trial observations. */
-            if (compute_jaccard && !repeat)
-                for (left_split=0;left_split<per;++left_split) {
-                double value=ssh3_edit_neighborhood_jaccard(
-                    left_text,right_text,left_split,edits-left_split);
-                if (isnan(value)) goto pair_failed;
-                jaccard_sum[left_split]+=value;
-                jaccard_sq_sum[left_split]+=value*value;
-            }
-            s1=malloc(n1); s2=malloc(n2);
-            left=calloc(per,sizeof(*left)); right=calloc(per,sizeof(*right));
-            if (!s1 || !s2 || !left || !right) goto pair_failed;
-            encode(left_text,n1,s1); encode(right_text,n2,s2);
-            if (subseqhash3_compute_all_edit_splits(s1,n1,edits,tables,left) ||
-                subseqhash3_compute_all_edit_splits(s2,n2,edits,tables,right))
-                goto pair_failed;
-            for (left_split=0;left_split<per;++left_split)
-                for (right_split=0;right_split<per;++right_split) {
-                    size_t index=left_split*per+right_split;
-                    int equal;
-                    if (left[left_split].length!=right[right_split].length)
-                        continue;
-                    ++compatible; denominators[index]+=1.0;
-                    equal=!memcmp(left[left_split].seed,right[right_split].seed,
-                                  left[left_split].length);
-                    collisions[index]+=(double)equal;
-                    any|=equal; all&=equal;
-                }
-            if (!compatible) goto pair_failed;
-            subseqhash3_edit_results_destroy(left,per);
-            subseqhash3_edit_results_destroy(right,per);
-            free(left); free(right); free(s1); free(s2);
-            any_collisions+=(size_t)any; all_collisions+=(size_t)all; ++pairs;
-            continue;
-pair_failed:
-            subseqhash3_edit_results_destroy(left,per);
-            subseqhash3_edit_results_destroy(right,per);
-            free(left); free(right); free(s1); free(s2);
-            goto repeat_failed;
-        }
-        if (ferror(input) || pairs!=expected_pairs) goto repeat_failed;
-        wall_sum+=seconds(CLOCK_MONOTONIC)-wall_start;
-        cpu_sum+=seconds(CLOCK_PROCESS_CPUTIME_ID)-cpu_start;
-        pairs_sum+=pairs; any_sum+=any_collisions; all_sum+=all_collisions;
-        continue;
-repeat_failed:
-        goto done;
-    }
-
-    printf("file %s\n",filename);
-    printf("maximum_input_length %zu\n",maximum_length);
-    printf("edits %zu\nresidues %zu\nrepeats %zu\n",edits,d,repeats);
-    printf("average_pairs %.3f\n",pairs_sum/repeats);
-    printf("average_wall_seconds %.6f\n",wall_sum/repeats);
-    printf("average_cpu_seconds %.6f\n",cpu_sum/repeats);
-    printf("any_seed_collision_probability %.9f\n",
-           pairs_sum?any_sum/pairs_sum:0.0);
-    printf("all_compatible_seeds_collision_probability %.9f\n",
-           pairs_sum?all_sum/pairs_sum:0.0);
-    for (left_split=0;left_split<per;++left_split)
-        for (right_split=0;right_split<per;++right_split) {
-            size_t index=left_split*per+right_split;
-            if (denominators[index])
-                printf("left_Es%zu_Ed%zu_right_Es%zu_Ed%zu_collision_probability %.9f\n",
-                       left_split,edits-left_split,right_split,
-                       edits-right_split,collisions[index]/denominators[index]);
-        }
-    if (compute_jaccard)
-        for (left_split=0;left_split<per;++left_split) {
-            double mean=jaccard_sum[left_split]/expected_pairs;
-            double variance=jaccard_sq_sum[left_split]/expected_pairs-mean*mean;
-            if (variance<0 && variance>-1e-15) variance=0;
-            printf("Es%zu_Ed%zu_average_jaccard %.9f\n",
-                   left_split,edits-left_split,mean);
-            printf("Es%zu_Ed%zu_jaccard_std %.9f\n",
-                   left_split,edits-left_split,sqrt(variance));
-        }
-    status=0;
-done:
-    free(jaccard_sq_sum); free(jaccard_sum);
-    free(denominators); free(collisions); free(line); fclose(input);
-    return status;
+static int collect_ind(size_t start,const SubseqHash3DeletionResult *seeds,size_t count,void *ctx) {
+    SeedBatch *a=ctx; (void)start;
+    for (size_t i=0;i<count;++i) if (batch_copy(a,i,seeds[i].seed,seeds[i].length)) return -1;
+    return 0;
+}
+static int batch_seed(SeedBatch *a,const char *dna,size_t length,size_t e,
+    const SubseqHash3PivotTables *tables,size_t r,size_t sets,int ind,SubseqHash3Traversal traversal) {
+    a->count=r*sets;
+    a->seed=calloc(a->count,sizeof(*a->seed)); a->length=calloc(a->count,sizeof(*a->length));
+    uint8_t *encoded=malloc(length);
+    if (!a->seed || !a->length || !encoded) { free(encoded); return -1; }
+    static const char alphabet[]="ACGTacgt";
+    for (size_t i=0;i<length;++i) encoded[i]=(uint8_t)((strchr(alphabet,dna[i])-alphabet)%4);
+    int status=ind?subseqhash3_seeds_ind(encoded,length,length,e,tables,r,sets,traversal,collect_ind,a):
+        subseqhash3_seeds_sub(encoded,length,length,e,tables,r,sets,traversal,collect_sub,a);
+    free(encoded); return status;
+}
+static int equal_seed(const SeedBatch *a,size_t i,const SeedBatch *b,size_t j) {
+    return a->length[i]==b->length[j] && !memcmp(a->seed[i],b->seed[j],a->length[i]);
+}
+static void help(FILE *stream) {
+    fputs("Evaluate pivot seeds using the same R pivots and S sets as seeding.\n\n"
+        "Usage:\n  subseqhash3 collisions sub|ind PAIRS_FILE E D R S [TABLE_FILE]\n"
+        "                         [--inward] [--seed SEED] [--jaccard]\n\n"
+        "  sub        One deletion and exactly E substitutions per string.\n"
+        "  ind        Exactly E deletions and no substitutions per string.\n"
+        "  PAIRS_FILE One ACGT_STRING1,ACGT_STRING2 pair per line; no header.\n"
+        "  R          Leading pivots per set, valid for BOTH strings in every pair.\n"
+        "  S          Independent table sets; each string produces R*S seeds.\n"
+        "  TABLE_FILE Optional pivot tables with matching D and at least S sets.\n"
+        "  --inward   Alternative traversal; default is outward.\n"
+        "  --seed     Reproducible automatic tables, stored in PAIRS_FILE.piv.\n"
+        "  --jaccard  Also calculate exact edit-neighborhood Jaccard (can be slow).\n\n"
+        "Whole strings are seeded as single windows. Different seed lengths do not\n"
+        "match. Report any seed-pair intersection and aligned set/pivot matches.\n",stream);
 }
 
 int ssh3_collisions_main(int argc,char **argv) {
-    size_t edits,d,repeats,maximum_length,pairs;
-    int argument,compute_jaccard=0;
-    const char *table_path=NULL;
-    uint64_t seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
-    SubseqHash3TableFile tables={0};
-    char *generated_path=NULL;
-    int result=EXIT_FAILURE;
-    if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) {
-        help(stdout); return EXIT_SUCCESS;
+    const char *args[7]; size_t nargs=0,max_length=0,pairs=0,capacity=0;
+    uint64_t v[4],seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
+    int inward=0,jaccard=0,seed_set=0,status=EXIT_FAILURE;
+    FILE *input=NULL; char *line=NULL,*generated=NULL;
+    size_t *aligned=NULL,any=0,any_aligned=0,all_aligned=0;
+    double jac_sum=0,jac_sq=0;
+    SubseqHash3PivotTableFile file={0};
+    if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) { help(stdout); return 0; }
+    for (int i=1;i<argc;++i) {
+        if (!strcmp(argv[i],"--inward")) { if (inward) goto invalid; inward=1; }
+        else if (!strcmp(argv[i],"--jaccard")) { if (jaccard) goto invalid; jaccard=1; }
+        else if (!strcmp(argv[i],"--seed")) {
+            if (seed_set || i+1>=argc || ssh3_cli_number(argv[++i],&seed)) goto invalid;
+            seed_set=1;
+        } else {
+            if (!strncmp(argv[i],"--",2) || nargs==7) goto invalid;
+            args[nargs++]=argv[i];
+        }
     }
-    if (argc<5 || argc>7 || parse_size(argv[2],&edits) ||
-        parse_size(argv[3],&d) || parse_size(argv[4],&repeats) ||
-        !d || !repeats || edits==SIZE_MAX) {
-        help(stderr); return EXIT_FAILURE;
+    if (nargs<6 || (strcmp(args[0],"sub") && strcmp(args[0],"ind")) || (nargs==7 && seed_set)) goto invalid;
+    for (size_t i=0;i<4;++i) if (ssh3_cli_number(args[i+2],v+i) || v[i]>SIZE_MAX) goto invalid;
+    const int ind=!strcmp(args[0],"ind");
+    const size_t e=(size_t)v[0],d=(size_t)v[1],r=(size_t)v[2],sets=(size_t)v[3];
+    if (!d || !r || !sets || sets>SIZE_MAX/r || r*sets>SIZE_MAX/sizeof(*aligned)) goto invalid;
+    input=fopen(args[1],"r"); if (!input) { perror(args[1]); goto done; }
+    ssize_t got;
+    /* Validate every pair and dimension before generating tables or emitting statistics. */
+    while ((got=getline(&line,&capacity,input))>=0) {
+        char *left,*right; size_t n1,n2;
+        if (parse_pair(line,(size_t)got,&left,&n1,&right,&n2)) goto bad_pair;
+        if (n1<(ind?1u:2u) || n2<(ind?1u:2u) || n1>(ind?256u:257u) || n2>(ind?256u:257u) ||
+            e>=n1 || e>=n2 || r>(ind?n1-e:n1-1) || r>(ind?n2-e:n2-1)) goto bad_pair;
+        if (n1>max_length) max_length=n1;
+        if (n2>max_length) max_length=n2;
+        ++pairs; continue;
+ bad_pair:
+        fprintf(stderr,"invalid DNA, edit budget or R on pair line %zu\n",pairs+1); goto done;
     }
-    for (argument=5;argument<argc;++argument) {
-        if (!strcmp(argv[argument],"--jaccard")) {
-            if (compute_jaccard) { help(stderr); return EXIT_FAILURE; }
-            compute_jaccard=1;
-        } else if (!table_path) table_path=argv[argument];
-        else { help(stderr); return EXIT_FAILURE; }
+    if (ferror(input) || !pairs) { fputs("pair file is empty or unreadable\n",stderr); goto done; }
+    if (ssh3_cli_tables(&file,nargs==7?args[6]:NULL,&generated,args[1],args[1],max_length,d,sets,
+        ind?max_length-e:max_length-1,seed)) goto done;
+    aligned=calloc(r*sets,sizeof(*aligned)); if (!aligned) goto done;
+    rewind(input); clearerr(input);
+    size_t seen=0;
+    while ((got=getline(&line,&capacity,input))>=0) {
+        char *left,*right; size_t n1,n2; SeedBatch a={0},b={0};
+        if (parse_pair(line,(size_t)got,&left,&n1,&right,&n2)) goto done;
+        if (batch_seed(&a,left,n1,e,file.tables,r,sets,ind,inward?SUBSEQHASH3_INWARD:SUBSEQHASH3_OUTWARD) ||
+            batch_seed(&b,right,n2,e,file.tables,r,sets,ind,inward?SUBSEQHASH3_INWARD:SUBSEQHASH3_OUTWARD)) {
+            batch_free(&a); batch_free(&b); goto done;
+        }
+        int some=0,all=1,intersection=0;
+        for (size_t i=0;i<r*sets;++i) {
+            const int equal=equal_seed(&a,i,&b,i);
+            aligned[i]+=(size_t)equal; some|=equal; all&=equal;
+            for (size_t j=0;!intersection && j<r*sets;++j) intersection|=equal_seed(&a,i,&b,j);
+        }
+        any+=(size_t)intersection; any_aligned+=(size_t)some; all_aligned+=(size_t)all;
+        batch_free(&a); batch_free(&b);
+        if (jaccard) {
+            const double jac=ssh3_edit_neighborhood_jaccard(left,right,ind?0:e,ind?e:1);
+            if (!isfinite(jac)) goto done;
+            jac_sum+=jac; jac_sq+=jac*jac;
+        }
+        ++seen;
     }
-    if (scan_input(argv[1],edits,&maximum_length,&pairs)) goto done;
-    if (!table_path) {
-        size_t length=strlen(argv[1]);
-        generated_path=malloc(length+5);
-        if (!generated_path) goto done;
-        memcpy(generated_path,argv[1],length);
-        memcpy(generated_path+length,".ABC",5);
-        if (subseqhash3_table_file_create(
-                generated_path,maximum_length,d,repeats,seed)) goto done;
+    if (ferror(input) || seen!=pairs) goto done;
+    printf("mode %s\ntraversal %s\npairs %zu\nresidues %zu\npivots_per_set %zu\nsets %zu\nseeds_per_string %zu\n",
+        args[0],inward?"inward":"outward",pairs,d,r,sets,r*sets);
+    printf("any_seed_collision_probability %.9f\n",(double)any/pairs);
+    printf("any_same_set_pivot_collision_probability %.9f\n",(double)any_aligned/pairs);
+    printf("all_same_set_pivot_collision_probability %.9f\n",(double)all_aligned/pairs);
+    for (size_t i=0;i<r*sets;++i)
+        printf("set_%zu_pivot_%zu_collision_probability %.9f\n",i/r,i%r,(double)aligned[i]/pairs);
+    if (jaccard) {
+        const double mean=jac_sum/pairs;
+        printf("average_jaccard %.9f\njaccard_std %.9f\n",mean,sqrt(fmax(0,jac_sq/pairs-mean*mean)));
     }
-    if (subseqhash3_table_file_open(&tables,table_path?table_path:generated_path))
-        goto done;
-    if (tables.n<maximum_length || tables.d!=d || tables.count!=repeats) {
-        fputs("table file dimensions do not match the input, D, and R\n",stderr);
-        goto done;
-    }
-    fprintf(stderr,"backend: %s\n",subseqhash3_backend());
-    result=estimate(argv[1],edits,d,repeats,maximum_length,pairs,&tables,
-                    compute_jaccard)?
-        EXIT_FAILURE:EXIT_SUCCESS;
+    status=ferror(stdout)?EXIT_FAILURE:EXIT_SUCCESS;
 done:
-    free(generated_path); subseqhash3_table_file_close(&tables);
-    return result;
+    if (input && fclose(input)) status=EXIT_FAILURE;
+    free(line); free(generated); free(aligned); subseqhash3_pivot_table_file_close(&file); return status;
+invalid:
+    help(stderr); return EXIT_FAILURE;
 }

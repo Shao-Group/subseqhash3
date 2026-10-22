@@ -1,5 +1,8 @@
 # One deletion, E substitutions, multiple pivot orders
 
+For the current pivot-only CLI and explicit R/S arguments, see
+[SEEDING.md](SEEDING.md). Command examples below use the historical interface.
+
 This is a new algorithm and API in `src/ssh3_pivots.h` and
 `src/ssh3_pivots.c`. It generates one minimizing length-`k=n-1` string
 per requested pivot. Every result uses **exactly one deletion and exactly

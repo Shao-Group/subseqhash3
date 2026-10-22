@@ -1,5 +1,8 @@
 # Exactly E deletions, up to k SubseqHash2 orders
 
+For the current pivot-only CLI and explicit R/S arguments, see
+[SEEDING.md](SEEDING.md). Command examples below use the historical interface.
+
 The separate `src/ssh3_deletions.h` / `src/ssh3_deletions.c` API produces
 length-k seeds, where k=n-E, with **exactly E deletions and no substitutions**.
 One call returns minimizers for up to k requested pivot orders, sharing its

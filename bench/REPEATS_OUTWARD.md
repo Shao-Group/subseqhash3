@@ -1,5 +1,8 @@
 # Outward versus inward repeats
 
+For the current pivot-only CLI and explicit R/S arguments, see
+[SEEDING.md](SEEDING.md). Command examples below use the historical interface.
+
 Both traversals produce length-(n-1) seeds with **exactly one deletion and E
 substitutions of retained bases**. They use identical table arrays and
 minimize psi, then maximize omega. Inward reads the retained left prefix

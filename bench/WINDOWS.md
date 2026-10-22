@@ -1,21 +1,24 @@
 # Sliding windows over long sequences
 
-`repeats` and `deletions` now use public long-sequence APIs. Both commands
+`seeds-sub` and `seeds-ind` now use public long-sequence APIs. Both commands
 emit every length-W window in increasing start order. Outward is the default;
 `--inward` selects the alternative hash family. Outward reuses side DPs
 across overlapping windows. Inward retains its two shared side DPs within
 each window, rebuilding their scores for the next window.
 
 ```sh
-build/subseqhash3 tables 50 1024 49 shared.piv --pivots --seed 42
-build/subseqhash3 repeats long.seq 50 8 1024 49 outward.csv shared.piv
-build/subseqhash3 repeats long.seq 50 8 1024 49 inward.csv shared.piv --inward
-build/subseqhash3 deletions long.seq 50 8 1024 42 outward-deletions.csv shared.piv
-build/subseqhash3 deletions long.seq 50 8 1024 42 inward-deletions.csv shared.piv --inward
+build/subseqhash3 tables 50 1024 1 shared.piv --seed 42
+build/subseqhash3 seeds-sub long.seq 50 8 1024 49 1 outward.csv shared.piv
+build/subseqhash3 seeds-sub long.seq 50 8 1024 49 1 inward.csv shared.piv --inward
+build/subseqhash3 seeds-ind long.seq 50 8 1024 42 1 outward-deletions.csv shared.piv
+build/subseqhash3 seeds-ind long.seq 50 8 1024 42 1 inward-deletions.csv shared.piv --inward
 ```
 
-Input is still one A/C/G/T sequence per line, with a separate window stream
-for each line. Existing CSV schemas and ordering are unchanged. Tables,
+The current R-per-set, S-set interface is documented in [SEEDING.md](SEEDING.md).
+The C interfaces below remain available with their original semantics.
+
+Input is one A/C/G/T sequence per line, with a separate window stream
+for each line. The current CSV includes set and pivot indices. Tables,
 edit budgets, scores, seed strings and deterministic witnesses match the
 corresponding single-window APIs exactly. Choosing a different traversal
 still changes the hash family and may change scores and seeds.
