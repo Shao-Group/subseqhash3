@@ -31,21 +31,78 @@ typedef struct { FILE *out; size_t sequence,r; } CSV;
 static int write_sub(size_t start,const SubseqHash3EditResult *a,size_t count,void *ctx) {
     CSV *c=ctx;
     for (size_t i=0;i<count;++i) {
-        if (fprintf(c->out,"%zu,%zu,%zu,%zu,%zu,%zu,",i/c->r,i%c->r,c->sequence,start,
-            a[i].substitutions,a[i].deletions)<0) return -1;
-        for (size_t j=0;j<a[i].length;++j) if (fputc("ACGT"[a[i].seed[j]],c->out)==EOF) return -1;
-        if (fprintf(c->out,",%zu,%.0f\n",a[i].psi,a[i].omega)<0) return -1;
+        char row[512];
+        int used=snprintf(row,sizeof(row),"%zu,%zu,%zu,%zu,%zu,%zu,",i/c->r,i%c->r,c->sequence,start,
+            a[i].substitutions,a[i].deletions);
+        if (used<0 || (size_t)used+a[i].length>=sizeof(row)) return -1;
+        for (size_t j=0;j<a[i].length;++j) row[used++]="ACGT"[a[i].seed[j]];
+        const int tail=snprintf(row+used,sizeof(row)-(size_t)used,",%zu,%.0f\n",a[i].psi,a[i].omega);
+        if (tail<0 || (size_t)tail>=sizeof(row)-(size_t)used ||
+            fwrite(row,1,(size_t)(used+tail),c->out)!=(size_t)(used+tail)) return -1;
     }
     return 0;
 }
 static int write_ind(size_t start,const SubseqHash3DeletionResult *a,size_t count,void *ctx) {
     CSV *c=ctx;
     for (size_t i=0;i<count;++i) {
-        if (fprintf(c->out,"%zu,%zu,%zu,%zu,0,%zu,",i/c->r,i%c->r,c->sequence,start,a[i].deletions)<0) return -1;
-        for (size_t j=0;j<a[i].length;++j) if (fputc("ACGT"[a[i].seed[j]],c->out)==EOF) return -1;
-        if (fprintf(c->out,",%zu,%" PRId64 "\n",a[i].psi,a[i].omega)<0) return -1;
+        char row[512];
+        int used=snprintf(row,sizeof(row),"%zu,%zu,%zu,%zu,0,%zu,",i/c->r,i%c->r,c->sequence,start,a[i].deletions);
+        if (used<0 || (size_t)used+a[i].length>=sizeof(row)) return -1;
+        for (size_t j=0;j<a[i].length;++j) row[used++]="ACGT"[a[i].seed[j]];
+        const int tail=snprintf(row+used,sizeof(row)-(size_t)used,",%zu,%" PRId64 "\n",a[i].psi,a[i].omega);
+        if (tail<0 || (size_t)tail>=sizeof(row)-(size_t)used ||
+            fwrite(row,1,(size_t)(used+tail),c->out)!=(size_t)(used+tail)) return -1;
     }
     return 0;
+}
+
+/* Keep allocations and the converted deletion tables across lines that each
+   contain one window. Public single-sequence APIs retain their ownership rules. */
+typedef struct {
+    SubseqHash3PivotWorkspace *pw;
+    SubseqHash3DeletionWorkspace *dw;
+    SubseqHash3DeletionTables *tables;
+    SubseqHash3EditResult *sub;
+    SubseqHash3DeletionResult *ind;
+    size_t sets,total;
+} SingleWindow;
+static void single_destroy(SingleWindow *w) {
+    subseqhash3_pivot_workspace_destroy(w->pw);
+    subseqhash3_deletion_workspace_destroy(w->dw);
+    if (w->tables) for (size_t f=0;f<w->sets;++f) subseqhash3_deletion_tables_destroy(w->tables+f);
+    free(w->tables);
+    if (w->sub) subseqhash3_edit_results_destroy(w->sub,w->total);
+    if (w->ind) subseqhash3_deletion_results_destroy(w->ind,w->total);
+    free(w->sub); free(w->ind);
+}
+static int single_seed(SingleWindow *w,const uint8_t *s,size_t n,size_t e,
+    const SubseqHash3PivotTables *tables,size_t r,size_t sets,int ind,int inward,CSV *csv) {
+    w->sets=sets; w->total=r*sets;
+    if (ind) {
+        if (!w->dw) {
+            w->dw=subseqhash3_deletion_workspace_create();
+            w->tables=calloc(sets,sizeof(*w->tables)); w->ind=calloc(w->total,sizeof(*w->ind));
+            if (!w->dw || !w->tables || !w->ind) return -1;
+            for (size_t f=0;f<sets;++f)
+                if (subseqhash3_deletion_tables_from_pivots(w->tables+f,tables+f)) return -1;
+        }
+        for (size_t f=0;f<sets;++f)
+            if ((inward?subseqhash3_compute_inward_deletion_seeds_with_workspace:
+                    subseqhash3_compute_deletion_seeds_with_workspace)(s,n,e,w->tables+f,NULL,r,
+                        w->ind+f*r,w->dw)) return -1;
+        const int failed=write_ind(0,w->ind,w->total,csv);
+        subseqhash3_deletion_results_destroy(w->ind,w->total); return failed;
+    }
+    if (!w->pw) {
+        w->pw=subseqhash3_pivot_workspace_create(); w->sub=calloc(w->total,sizeof(*w->sub));
+        if (!w->pw || !w->sub) return -1;
+    }
+    for (size_t f=0;f<sets;++f)
+        if ((inward?subseqhash3_compute_pivot_repeats_with_workspace:
+                subseqhash3_compute_outward_pivot_repeats_with_workspace)(s,n,e,tables+f,1,r,
+                    w->sub+f*r,w->pw)) return -1;
+    const int failed=write_sub(0,w->sub,w->total,csv);
+    subseqhash3_edit_results_destroy(w->sub,w->total); return failed;
 }
 
 static int seeds_main(int argc,char **argv,int ind) {
@@ -53,6 +110,7 @@ static int seeds_main(int argc,char **argv,int ind) {
     uint64_t values[5],seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
     int inward=0,seed_set=0,status=EXIT_FAILURE;
     SubseqHash3PivotTableFile tables={0};
+    SingleWindow single={0};
     FILE *input=NULL,*output=NULL;
     char *generated=NULL,*line=NULL; uint8_t *encoded=NULL;
     struct timespec before,after;
@@ -99,7 +157,8 @@ static int seeds_main(int argc,char **argv,int ind) {
             encoded[j]=(uint8_t)((base-alphabet)%4);
         }
         CSV csv={output,sequence,r};
-        int failed=ind?subseqhash3_seeds_ind(encoded,len,w,e,tables.tables,r,sets,
+        int failed=len==w?single_seed(&single,encoded,w,e,tables.tables,r,sets,ind,inward,&csv):
+            ind?subseqhash3_seeds_ind(encoded,len,w,e,tables.tables,r,sets,
                 inward?SUBSEQHASH3_INWARD:SUBSEQHASH3_OUTWARD,write_ind,&csv):
             subseqhash3_seeds_sub(encoded,len,w,e,tables.tables,r,sets,
                 inward?SUBSEQHASH3_INWARD:SUBSEQHASH3_OUTWARD,write_sub,&csv);
@@ -112,6 +171,7 @@ static int seeds_main(int argc,char **argv,int ind) {
 done:
     if (input && fclose(input)) status=EXIT_FAILURE;
     if (output && fclose(output)) status=EXIT_FAILURE;
+    single_destroy(&single);
     subseqhash3_pivot_table_file_close(&tables);
     free(generated); free(line); free(encoded); return status;
 invalid:

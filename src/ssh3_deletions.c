@@ -1351,6 +1351,96 @@ static int window_engine_step(DeletionWindowEngine *v,const uint8_t *s,
     return compute_compact_seeds(s+start,t,NULL,v->count,v->out,w,0,0,1);
 }
 
+/* Process all windows that use an anchor before replacing its score tables.
+   Only candidate seeds survive in the ring; the two large DPs are reused. */
+static int seed_ind_anchors(const uint8_t *s,size_t length,size_t n,size_t e,
+    const SubseqHash3DeletionTables *tables,size_t count,size_t sets,
+    SubseqHash3DeletionWindowCallback callback,void *context) {
+    SubseqHash3DeletionWorkspace *w=subseqhash3_deletion_workspace_create();
+    SubseqHash3DeletionWorkspace *prepared=NULL;
+    SubseqHash3DeletionResult *ring=NULL;
+    const size_t k=n-e,slots=count+e,total=count*sets,last=length-n;
+    int status=-1;
+    if (!w || sets>SIZE_MAX/(2*sizeof(*prepared)) || total>SIZE_MAX/slots ||
+        total*slots>SIZE_MAX/sizeof(*ring)) goto done;
+    prepared=calloc(2*sets,sizeof(*prepared));
+    ring=calloc(slots*total,sizeof(*ring));
+    if (!prepared || !ring) goto done;
+    /* Check compact-score eligibility before emitting any callback. */
+    for (size_t f=0;f<sets;++f) {
+        SubseqHash3DeletionWorkspace *l=prepared+2*f,*r=l+1;
+        l->d=r->d=tables[f].d;
+        const int a=prepare_inward(l,&tables[f].left,count-1,1);
+        const int b=prepare_inward(r,&tables[f].right,k-1,0);
+        if (a<0 || b<0) goto done;
+        if (a || b) { status=1; goto done; }
+    }
+    for (size_t anchor=0;anchor<=last+slots-1;++anchor) {
+        for (size_t f=0;f<sets;++f) {
+            const SubseqHash3DeletionTables *t=tables+f;
+            const size_t d=t->d;
+            uint8_t input[256]={0};
+            if (reserve(w,n,k,e,d,-1)) goto done;
+            for (size_t j=1;j<n && j<=anchor;++j) input[j-1]=s[anchor-j];
+            if (build_inward(w,&w->inward_left,input,&t->left,count-1,1,prepared+2*f)) goto done;
+            memset(input,0,n);
+            for (size_t j=1;j<n && j<length-anchor;++j) input[n-j]=s[anchor+j];
+            if (build_inward(w,&w->inward_right,input,&t->right,k-1,0,prepared+2*f+1)) goto done;
+            for (size_t p=0;p<count;++p) for (size_t h=0;h<=e;++h) {
+                const size_t i=p+h;
+                if (anchor<i || anchor-i>last) continue;
+                const size_t start=anchor-i,row=4*p+s[anchor];
+                SubseqHash3DeletionResult *out=ring+(start%slots)*total+f*count+p;
+                const uint16_t *l=(t->left_sign[row]>0?w->inward_left.high:w->inward_left.low)+
+                    inward_state(&w->inward_left,i,h,e);
+                const uint16_t *r=(t->right_sign[row]>0?w->inward_right.high:w->inward_right.low)+
+                    inward_state(&w->inward_right,n-i-1,e-h,e);
+                size_t psi=0,shift=t->pivot_C[row];
+                unsigned cost=p==0?(unsigned)l[0]+r[shift]:
+                    p==k-1?(unsigned)l[shift?d-shift:0]+r[0]:inward_join(l,r,d,shift);
+                if (cost>=UINT16_MAX) {
+                    if (out->seed && !out->psi) continue;
+                    psi=inward_first(w,l,r,shift);
+                    if (psi==d) continue;
+                    shift=submod(shift,psi,d);
+                    cost=p==0?(unsigned)l[0]+r[shift]:
+                        p==k-1?(unsigned)l[shift?d-shift:0]+r[0]:inward_join(l,r,d,shift);
+                    if (cost>=UINT16_MAX) continue;
+                }
+                const int64_t score=127*(int64_t)(k-1)-(int64_t)cost+t->pivot_A[row];
+                if (out->seed && (psi>out->psi || (psi==out->psi && score<=out->omega))) continue;
+                const size_t q=compact_witness(l,r,d,submod(psi,t->pivot_C[row],d),cost);
+                if (q==d) goto done;
+                if (!out->seed) {
+                    out->seed=malloc(k); out->positions=malloc(k*sizeof(size_t));
+                    if (!out->seed || !out->positions) goto done;
+                }
+                out->length=k; out->deletions=e; out->psi=psi; out->omega=score;
+                out->seed[p]=s[anchor]; out->positions[p]=i;
+                trace_window_side(s+start,e,d,&t->left,&w->inward_left,i,p,i,h,
+                    submod(submod(psi,t->pivot_C[row],d),q,d),t->left_sign[row]>0,1,out);
+                trace_window_side(s+start,e,d,&t->right,&w->inward_right,i,p,n-i-1,e-h,
+                    q,t->right_sign[row]>0,0,out);
+            }
+        }
+        if (anchor>=slots-1) {
+            const size_t start=anchor-(slots-1);
+            SubseqHash3DeletionResult *out=ring+(start%slots)*total;
+            for (size_t a=0;a<total;++a) if (!out[a].seed) goto done;
+            if (callback(start,out,total,context)) goto done;
+            subseqhash3_deletion_results_destroy(out,total);
+        }
+    }
+    status=0;
+done:
+    if (prepared) for (size_t f=0;f<2*sets;++f) {
+        free(prepared[f].packed_A); free(prepared[f].inward_masks);
+    }
+    free(prepared);
+    subseqhash3_deletion_results_destroy(ring,ring?slots*total:0); free(ring);
+    subseqhash3_deletion_workspace_destroy(w); return status;
+}
+
 static int seed_ind_windows(const uint8_t *s,size_t length,size_t n,size_t e,
     const SubseqHash3DeletionTables *tables,size_t count,size_t sets,
     SubseqHash3Traversal traversal,SubseqHash3DeletionWindowCallback callback,void *context) {
@@ -1362,6 +1452,18 @@ static int seed_ind_windows(const uint8_t *s,size_t length,size_t n,size_t e,
         sets>SIZE_MAX/sizeof(*engines) || count*sets>SIZE_MAX/sizeof(*out) ||
         (traversal!=SUBSEQHASH3_OUTWARD && traversal!=SUBSEQHASH3_INWARD)) return -1;
     for (size_t j=0;j<length;++j) if (s[j]>3) return -1;
+    for (size_t f=0;f<sets;++f) {
+        const SubseqHash3DeletionTables *t=tables+f;
+        if (t->k<n-e || !t->d || !t->left.A || !t->right.A ||
+            !t->left.B1 || !t->right.B1 || !t->left.C || !t->right.C ||
+            !t->pivot_A || !t->pivot_C || !t->left_sign || !t->right_sign) return -1;
+    }
+    if (traversal==SUBSEQHASH3_OUTWARD && length-n>=count+e &&
+        tables[0].d>=128 && e && n-e>1 &&
+        !(e==1 && tables[0].d>=8*n)) {
+        const int result=seed_ind_anchors(s,length,n,e,tables,count,sets,callback,context);
+        if (result!=1) return result;
+    }
     out=calloc(count*sets,sizeof(*out)); engines=calloc(sets,sizeof(*engines));
     if (!out || !engines) goto done;
     for (size_t f=0;f<sets;++f)

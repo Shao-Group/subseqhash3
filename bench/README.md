@@ -4,6 +4,9 @@ For the current pivot-only command line, table generation and R/S contract,
 see [SEEDING.md](SEEDING.md). Legacy algorithm and CLI examples below record
 the historical interface; the low-level C functions remain available.
 
+For current single-thread `seeds-sub`/`seeds-ind` runtime improvements, exact
+output comparisons and end-to-end measurements, see [SEED-RUNTIME.md](SEED-RUNTIME.md).
+
 `subseqhash3_compute_one_substitution(s, n, E, tables, result)` computes
 exactly one substitution and exactly `E` deletions. The corresponding
 reference call is `subseqhash3_compute_all_edit_splits(s, n, E+1, tables,

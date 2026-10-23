@@ -69,6 +69,26 @@ def main():
                 # R changes only the leading pivots selected in EACH set.
                 run('seeds-' + mode, dna, 7, e, 33, 1, 3, auto, table, *flag)
                 assert rows(auto) == [a for a in actual if a['pivot'] == '0']
+        # Reused single-window workspaces must agree with the first window of
+        # longer inputs, including interleaved short/long lines and both sets.
+        for d in [32, 129, 1024]:
+            run('tables', 7, d, 2, table, '--seed', 42)
+            for mode in ['sub', 'ind']:
+                for inward in [False, True]:
+                    flag = ['--inward'] if inward else []
+                    dna.write_text('\n'.join(inputs) + '\n')
+                    run('seeds-' + mode, dna, 7, 2, d, 3, 2, out, table, *flag)
+                    expected = [a for a in rows(out) if a['window_start'] == '0']
+                    dna.write_text('\n'.join(x[:7] for x in inputs) + '\n')
+                    run('seeds-' + mode, dna, 7, 2, d, 3, 2, out, table, *flag)
+                    assert rows(out) == expected
+                    dna.write_text(inputs[0][:7] + '\n' + inputs[1] + '\n' + inputs[0][:7] + '\n')
+                    run('seeds-' + mode, dna, 7, 2, d, 3, 2, out, table, *flag)
+                    mixed = rows(out)
+                    assert [a for a in mixed if a['sequence'] == '0'] == expected[:6]
+                    assert [dict(a, sequence='0') for a in mixed if a['sequence'] == '2'] == expected[:6]
+        dna.write_text('\n'.join(inputs) + '\n')
+        run('tables', 7, 33, 3, table, '--seed', 42)
         # Validate dimensions, unsupported options and aliases without truncating OUTPUT.
         out.write_text('KEEP\n')
         for mode in ['sub', 'ind']:

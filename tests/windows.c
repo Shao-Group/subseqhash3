@@ -132,6 +132,9 @@ int main(void) {
             check(5,e,ds[d],pattern,0);
     check(9,3,33,0,1); check(9,1,1024,0,1);
     check(12,4,32,0,0); check(12,8,1,0,0);
+    /* Larger anchor rings, sparse residues, exact ties, and wide-table fallback. */
+    check(30,4,1024,0,0); check(30,4,129,1,0);
+    check(12,3,129,0,1); check(50,8,1024,2,0);
     printf("window APIs: %zu configurations, %zu windows match exact per-window scores, seeds and witnesses; callback cancellation and validation passed\n",configurations,windows);
     return 0;
 }

@@ -1,0 +1,41 @@
+{
+  "cpu": 2,
+  "cpu_model": "Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz",
+  "platform": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "samples": 5,
+  "parameters": {
+    "W": 30,
+    "E": 5,
+    "D": [
+      64,
+      1024
+    ],
+    "R": 10,
+    "S": 1,
+    "length": 1000,
+    "lines": 1,
+    "traversal": "outward",
+    "sequence_seed": 562,
+    "table_seed": 42
+  },
+  "protocol": "One CPU, single-threaded commands, one untimed warmup per executable; alternating before/after pairs; median whole-process wall time including table loading, conversion, seeding and CSV I/O; excludes table generation; complete CSV hashes checked every run.",
+  "input_sha256": "0225615da31c0da9518dab90e0f752f7d69a1b7ece383ea4fbba81c7cf0f78db",
+  "table_sha256": {
+    "64": "ab3c4278937923f7717b292a362e9146ca5815c5f677430f348554dae607f43a",
+    "1024": "070c0904b3b729327026ff75b3b3fa30edd423ce90d34c630117f1e8eb5ffeda"
+  },
+  "executables": {
+    "before": "/datadisk1/mxs2589/project/subseqhash3/build/runtime-before/subseqhash3",
+    "after": "/datadisk1/mxs2589/project/subseqhash3/build/runtime-after/subseqhash3"
+  },
+  "executable_sha256": {
+    "before": "541f0ad9ffd6e3277a93fbfef6e40e95fa028cb97352980be489da7550befc10",
+    "after": "3bde556312c3a0c7ceda3a4f8b57e290e9d6e620819359640f1537f4ecd3f813"
+  },
+  "source_sha256": {
+    "src/ssh3_pivots.c": "6e33afd6211c80ea068b2a667d39ddff311555be4c20caa26f54a7c40756e3df",
+    "src/ssh3_deletions.c": "4f8b9034c15ae36c61ae8e83907b39e0356eece4a72ac64d6e832fd294177291",
+    "src/ssh3_seed_cli.c": "d71804678ac41fb12cce563ea3655d58e4fbeb01bba43ab877232fb600797429",
+    "/datadisk1/mxs2589/project/subseqhash3/bench/run_typical_seed_runtime.py": "0f2474d7bc900d6151800738be7747fd4f7ecf61c06857d4a8af5fbeff2efdce"
+  }
+}
