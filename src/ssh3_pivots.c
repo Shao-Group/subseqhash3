@@ -276,7 +276,7 @@ static void dp_build_one(PivotDP *workspace,const uint8_t *s,size_t n,size_t max
 }
 #endif
 
-static void dp_build(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum,
+static inline __attribute__((always_inline)) void dp_build_kernel(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum,
     const SubseqHash3PivotTables *tables,int reverse,int record) {
 #if PIVOT_SIMD
     if (workspace->d==1 && workspace->edits<32) {
@@ -332,7 +332,7 @@ static void dp_build(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum
                 PREPARE(0,sym0); PREPARE(1,sym1); PREPARE(2,sym2);
                 PREPARE(3,original);
 #undef PREPARE
-#pragma GCC unroll 16
+#pragma GCC unroll 1
                 for (e=min_e;e<=max_e;++e) {
                     const size_t dst=dp_state(dp,l,h,e);
                     const size_t deletion=h?dp_state(dp,l-1,h-1,e):0;
@@ -429,6 +429,27 @@ static void dp_build(PivotDP *workspace,const uint8_t *s,size_t n,size_t maximum
     }
 }
 
+/* Separate parent recording and traversal direction at the call boundary,
+   keeping their branches and unused instructions out of each inner loop. */
+#define DEFINE_PIVOT_BUILD(NAME,REVERSE,RECORD) \
+static __attribute__((noinline)) void NAME(PivotDP *dp,const uint8_t *s,size_t n,size_t maximum, \
+    const SubseqHash3PivotTables *t) { dp_build_kernel(dp,s,n,maximum,t,REVERSE,RECORD); }
+DEFINE_PIVOT_BUILD(dp_scores_left,0,0)
+DEFINE_PIVOT_BUILD(dp_scores_right,1,0)
+DEFINE_PIVOT_BUILD(dp_parents_left,0,1)
+DEFINE_PIVOT_BUILD(dp_parents_right,1,1)
+#undef DEFINE_PIVOT_BUILD
+static void dp_build(PivotDP *dp,const uint8_t *s,size_t n,size_t maximum,
+    const SubseqHash3PivotTables *t,int reverse,int record) {
+    if (record) {
+        if (reverse) dp_parents_right(dp,s,n,maximum,t);
+        else dp_parents_left(dp,s,n,maximum,t);
+    } else {
+        if (reverse) dp_scores_right(dp,s,n,maximum,t);
+        else dp_scores_left(dp,s,n,maximum,t);
+    }
+}
+
 /* For a fixed output residue, the reflected right-side layout turns the
    residue constraint into a circular shift and pairwise SIMD addition. */
 static unsigned join_cost(const uint16_t *left,const uint16_t *right,
@@ -514,9 +535,11 @@ static size_t first_residue(const uint16_t *left,const uint16_t *right,
 
 #if PIVOT_SIMD
 static unsigned minimum_word(__m512i values) {
-    const __m512i pairs=_mm512_min_epu16(values,_mm512_srli_epi32(values,16));
-    return _mm512_reduce_min_epu32(_mm512_and_si512(
-        pairs,_mm512_set1_epi32(65535)));
+    const __m256i halves=_mm256_min_epu16(_mm512_castsi512_si256(values),
+        _mm512_extracti64x4_epi64(values,1));
+    const __m128i lanes=_mm_min_epu16(_mm256_castsi256_si128(halves),
+        _mm256_extracti128_si256(halves,1));
+    return (unsigned)_mm_extract_epi16(_mm_minpos_epu16(lanes),0);
 }
 
 /* Delay horizontal reductions until all edit splits have been compared.
@@ -691,6 +714,16 @@ static int choose_pivot(const uint8_t *s,size_t n,size_t edits,size_t pivot,
     return 0;
 }
 
+/* Once edits are exhausted, the remaining interval is a fixed witness. */
+static void trace_fixed(const uint8_t *s,size_t n,size_t retained,int reverse,
+    SubseqHash3EditResult *out,int outward,size_t anchor,size_t pivot) {
+    const size_t first=outward?(reverse?anchor+1:anchor-retained):(reverse?n-retained:0);
+    const size_t dst=outward?(reverse?pivot+1:pivot-retained):(reverse?out->length-retained:0);
+    memcpy(out->seed+dst,s+first,retained);
+    memset(out->substituted+dst,0,retained);
+    for (size_t j=0;j<retained;++j) out->positions[dst+j]=first+j;
+}
+
 static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
     const SubseqHash3Tables *t,int reverse,size_t l,size_t h,size_t e,
     size_t residue,int type,SubseqHash3EditResult *out,int outward,
@@ -700,6 +733,7 @@ static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
        search. Keep its tight loop separate from score-based recovery. */
     if (dp->parent) {
         while (retained) {
+            if (!h && !e) { trace_fixed(s,n,retained,reverse,out,outward,anchor,pivot);return; }
             const unsigned packed=dp->parent[dp_parent(dp,l,h,e)+residue];
             unsigned code=type==1?(packed&15u):(packed>>4);
             if (!code) { --l; --h; continue; }
@@ -722,18 +756,7 @@ static void trace_side(const uint8_t *s,size_t n,const PivotDP *dp,
         return;
     }
     while (retained) {
-        if (!h && !e) {
-            /* The remaining witness is fixed once all edits are consumed. */
-            while (retained) {
-                const size_t pos=outward?(reverse?anchor+l:anchor-l):
-                    (reverse?n-l:l-1);
-                const size_t dst=outward?(reverse?pivot+retained:pivot-retained):
-                    (reverse?out->length-retained:retained-1);
-                out->seed[dst]=s[pos]; out->positions[dst]=pos;
-                out->substituted[dst]=0; --retained; --l;
-            }
-            break;
-        }
+        if (!h && !e) { trace_fixed(s,n,retained,reverse,out,outward,anchor,pivot);return; }
         const size_t current=dp_state(dp,l,h,e)+residue;
         const unsigned best=type==1?dp->minimum[current]:dp->maximum[current];
         const unsigned original=s[outward?(reverse?anchor+l:anchor-l):
@@ -1032,7 +1055,10 @@ static int seed_sub_anchors(const uint8_t *s,size_t length,size_t n,size_t edits
     const SubseqHash3PivotTables *tables,size_t families,size_t repeats,size_t per_set,
     SubseqHash3RepeatsWindowCallback callback,void *context) {
     SubseqHash3PivotWorkspace w={0};
-    const size_t slots=per_set+1,k=n-1,last=length-n;
+    const size_t k=n-1,last=length-n;
+    /* Power-of-two storage removes division from candidate indexing. */
+    size_t slots=1;
+    while (slots<per_set+1) slots*=2;
     SubseqHash3EditResult *ring=NULL;
     int status=-1;
     if (repeats>SIZE_MAX/slots || slots*repeats>SIZE_MAX/sizeof(*ring)) return -1;
@@ -1060,12 +1086,12 @@ static int seed_sub_anchors(const uint8_t *s,size_t length,size_t n,size_t edits
                 const size_t i=p+option;
                 if (anchor<i || anchor-i>last) continue;
                 const size_t start=anchor-i;
-                SubseqHash3EditResult *out=ring+(start%slots)*repeats+first+p;
+                SubseqHash3EditResult *out=ring+(start&(slots-1))*repeats+first+p;
                 PivotChoice choice;
                 if (choose_pivot(s+start,n,edits,p,t,&w.left,&w.right,w.scratch,
-                        NULL,NULL,option,out->seed && !out->psi,&choice)) continue;
+                        NULL,NULL,option,out->length && !out->psi,&choice)) continue;
                 const double omega=127.0*k-choice.cost;
-                if (out->seed && (choice.psi>out->psi ||
+                if (out->length && (choice.psi>out->psi ||
                         (choice.psi==out->psi && omega<=out->omega))) continue;
                 if (!out->seed) {
                     out->seed=malloc(k); out->positions=malloc(k*sizeof(size_t));
@@ -1087,10 +1113,11 @@ static int seed_sub_anchors(const uint8_t *s,size_t length,size_t n,size_t edits
         }
         if (anchor>=per_set) {
             const size_t start=anchor-per_set;
-            SubseqHash3EditResult *out=ring+(start%slots)*repeats;
-            for (size_t a=0;a<repeats;++a) if (!out[a].seed) goto done;
+            SubseqHash3EditResult *out=ring+(start&(slots-1))*repeats;
+            for (size_t a=0;a<repeats;++a) if (!out[a].length) goto done;
             if (callback(start,out,repeats,context)) goto done;
-            subseqhash3_edit_results_destroy(out,repeats);
+            /* Retain buffers until the engine exits; length marks validity. */
+            for (size_t a=0;a<repeats;++a) out[a].length=0;
         }
     }
     status=0;
@@ -1117,7 +1144,7 @@ static int seed_sub_windows(const uint8_t *s,size_t length,size_t n,
     for (size_t j=0;j<length;++j) if (s[j]>3) return -1;
     for (size_t f=0;f<families;++f)
         if (tables[f].k<n-1 || !tables[f].d) return -1;
-    if (shared && length-n>=per_set && tables[0].d>=128 && edits)
+    if (shared && length-n>=per_set && (tables[0].d==64 || tables[0].d>=128) && edits)
         return seed_sub_anchors(s,length,n,edits,tables,families,repeats,per_set,callback,context);
     results=calloc(repeats,sizeof(*results));
     caches=calloc(families,sizeof(*caches));

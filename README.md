@@ -80,6 +80,10 @@ The former `seeds`, `repeats`, and `deletions` commands, `tables --pivots`,
 and the `--subseqhash2-tables` option are removed. Retained low-level C
 functions support legacy algorithms and text-table import.
 
+The current single-thread speed changes preserve exact seeds and scores.
+See [the measurements against 36de034](bench/EXACT-SEED-SPEED.md) for runtime,
+validation and the limits of the improvement.
+
 ## Seeding CSV
 
 Both commands write the same columns:

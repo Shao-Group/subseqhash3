@@ -5,6 +5,12 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <time.h>
+#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__)
+#include <immintrin.h>
+#define CSV_SIMD 1
+#else
+#define CSV_SIMD 0
+#endif
 
 static void help(FILE *out,int ind) {
     fprintf(out,"Generate pivot seeds for %s-heavy sequences (outward by default).\n\n"
@@ -28,32 +34,69 @@ static void help(FILE *out,int ind) {
 }
 
 typedef struct { FILE *out; size_t sequence,r; } CSV;
-static int write_sub(size_t start,const SubseqHash3EditResult *a,size_t count,void *ctx) {
-    CSV *c=ctx;
-    for (size_t i=0;i<count;++i) {
-        char row[512];
-        int used=snprintf(row,sizeof(row),"%zu,%zu,%zu,%zu,%zu,%zu,",i/c->r,i%c->r,c->sequence,start,
-            a[i].substitutions,a[i].deletions);
-        if (used<0 || (size_t)used+a[i].length>=sizeof(row)) return -1;
-        for (size_t j=0;j<a[i].length;++j) row[used++]="ACGT"[a[i].seed[j]];
-        const int tail=snprintf(row+used,sizeof(row)-(size_t)used,",%zu,%.0f\n",a[i].psi,a[i].omega);
-        if (tail<0 || (size_t)tail>=sizeof(row)-(size_t)used ||
-            fwrite(row,1,(size_t)(used+tail),c->out)!=(size_t)(used+tail)) return -1;
+static char *append_unsigned(char *out,uint64_t value) {
+    if (value<10) { *out++=(char)('0'+value); return out; }
+    char digits[20]; size_t n=0;
+    do { digits[n++]=(char)('0'+value%10);value/=10; } while (value);
+    while (n) *out++=digits[--n];
+    return out;
+}
+static char *append_signed(char *out,int64_t value) {
+    const uint64_t magnitude=value<0?-(uint64_t)value:(uint64_t)value;
+    if (value<0) *out++='-';
+    return append_unsigned(out,magnitude);
+}
+static inline __attribute__((always_inline)) char *csv_prefix(char *out,CSV *c,size_t i,const char *window,size_t window_length,size_t substitutions,size_t deletions) {
+    out=append_unsigned(out,i/c->r);*out++=',';out=append_unsigned(out,i%c->r);*out++=',';
+    out=append_unsigned(out,c->sequence);*out++=',';memcpy(out,window,window_length);out+=window_length;*out++=',';
+    out=append_unsigned(out,substitutions);*out++=',';out=append_unsigned(out,deletions);*out++=',';return out;
+}
+static char *append_dna(char *out,const uint8_t *seed,size_t length) {
+#if CSV_SIMD
+    const __m256i alphabet=_mm256_broadcastsi128_si256(_mm_set_epi32(0,0,0,0x54474341));
+    while (length>=32) {
+        _mm256_storeu_si256((__m256i *)out,_mm256_shuffle_epi8(alphabet,_mm256_loadu_si256((const __m256i *)seed)));
+        out+=32;seed+=32;length-=32;
     }
-    return 0;
+    if (length) {
+        const __mmask32 mask=(UINT32_C(1)<<length)-1;
+        /* The row buffer reserves 512 bytes before each row, including up
+           to 31 scratch bytes past the final seed character. */
+        _mm256_storeu_si256((__m256i *)out,_mm256_shuffle_epi8(alphabet,_mm256_maskz_loadu_epi8(mask,seed)));
+        out+=length;
+    }
+#else
+    for (size_t j=0;j<length;++j) *out++="ACGT"[seed[j]];
+#endif
+    return out;
+}
+static int write_sub(size_t start,const SubseqHash3EditResult *a,size_t count,void *ctx) {
+    CSV *c=ctx;char rows[8192],window[20],*out=rows;
+    const size_t window_length=(size_t)(append_unsigned(window,start)-window);
+    for (size_t i=0;i<count;++i) {
+        if ((size_t)(rows+sizeof(rows)-out)<512) {
+            const size_t length=(size_t)(out-rows);if (fwrite(rows,1,length,c->out)!=length) return -1;out=rows;
+        }
+        out=csv_prefix(out,c,i,window,window_length,a[i].substitutions,a[i].deletions);
+        out=append_dna(out,a[i].seed,a[i].length);
+        *out++=',';out=append_unsigned(out,a[i].psi);*out++=',';
+        out=append_signed(out,(int64_t)a[i].omega);*out++='\n';
+    }
+    const size_t length=(size_t)(out-rows);return fwrite(rows,1,length,c->out)!=length?-1:0;
 }
 static int write_ind(size_t start,const SubseqHash3DeletionResult *a,size_t count,void *ctx) {
-    CSV *c=ctx;
+    CSV *c=ctx;char rows[8192],window[20],*out=rows;
+    const size_t window_length=(size_t)(append_unsigned(window,start)-window);
     for (size_t i=0;i<count;++i) {
-        char row[512];
-        int used=snprintf(row,sizeof(row),"%zu,%zu,%zu,%zu,0,%zu,",i/c->r,i%c->r,c->sequence,start,a[i].deletions);
-        if (used<0 || (size_t)used+a[i].length>=sizeof(row)) return -1;
-        for (size_t j=0;j<a[i].length;++j) row[used++]="ACGT"[a[i].seed[j]];
-        const int tail=snprintf(row+used,sizeof(row)-(size_t)used,",%zu,%" PRId64 "\n",a[i].psi,a[i].omega);
-        if (tail<0 || (size_t)tail>=sizeof(row)-(size_t)used ||
-            fwrite(row,1,(size_t)(used+tail),c->out)!=(size_t)(used+tail)) return -1;
+        if ((size_t)(rows+sizeof(rows)-out)<512) {
+            const size_t length=(size_t)(out-rows);if (fwrite(rows,1,length,c->out)!=length) return -1;out=rows;
+        }
+        out=csv_prefix(out,c,i,window,window_length,0,a[i].deletions);
+        out=append_dna(out,a[i].seed,a[i].length);
+        *out++=',';out=append_unsigned(out,a[i].psi);*out++=',';
+        out=append_signed(out,a[i].omega);*out++='\n';
     }
-    return 0;
+    const size_t length=(size_t)(out-rows);return fwrite(rows,1,length,c->out)!=length?-1:0;
 }
 
 /* Keep allocations and the converted deletion tables across lines that each

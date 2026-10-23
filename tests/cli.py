@@ -95,7 +95,7 @@ def main():
             for r, s in [(0, 1), (7, 1), (2, 0), (2, 4), (2, 2**64-1)]:
                 run('seeds-' + mode, dna, 7, 1, 33, r, s, out, table, ok=False)
                 assert out.read_text() == 'KEEP\n'
-            for flags in [['--inward', '--inward'], ['--subseqhash2-tables', table], ['--unknown']]:
+            for flags in [['--inward', '--inward'], ['--subseqhash2-tables', table], ['--unknown'], ['--scheme', 'folded1'], ['--scheme', 'folded4']]:
                 run('seeds-' + mode, dna, 7, 1, 33, 2, 3, out, table, *flags, ok=False)
             run('seeds-' + mode, dna, 7, 1, 33, 2, 3, table, table, ok=False)
             run('seeds-' + mode, dna, 7, 1, 33, 2, 3, dna, table, ok=False)
@@ -109,6 +109,15 @@ def main():
             dna.write_text('A' * (w+1) + '\n')
             run('seeds-' + mode, dna, w, e, 1, r, 2, out, '--seed', 7)
             assert len(rows(out)) == 2*r*2
+        # Exercise CSV chunk flushing, full SIMD blocks, and masked tails.
+        for mode, w, e in [('sub', 50, 5), ('ind', 50, 5)]:
+            dna.write_text(('ACGT' * 13) + '\n')
+            run('seeds-' + mode, dna, w, e, 1, 40, 8, out, '--seed', 77)
+            actual = rows(out)
+            assert len(actual) == 3*40*8
+            assert all(len(a['seed']) == w-(1 if mode == 'sub' else e) for a in actual)
+            assert [(int(a['window_start']), int(a['set']), int(a['pivot'])) for a in actual] == [
+                (start, f, p) for start in range(3) for f in range(8) for p in range(40)]
         dna.write_text('ACNTACGT\n')
         run('seeds-sub', dna, 7, 1, 33, 2, 3, out, table, ok=False)
         # Output hard links and generated-table aliases must preserve input.
