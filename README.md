@@ -26,6 +26,7 @@ make BUILD_DIR=build/simd \
   CFLAGS='-O3 -std=c99 -Wall -Wextra -Wpedantic -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512' test
 ```
 
+The executable is `build/simd/subseqhash3`
 The SIMD binary requires compatible hardware; there is no runtime CPU dispatch.
 All seeding is single-threaded.
 
@@ -40,7 +41,7 @@ a higher probability of hash-collision at the cost of longer runtime.
 The following command generates and saves random ABCk tables.
 
 ```text
-build/subseqhash3 tables k D S OUTPUT [--seed SEED]
+subseqhash3 tables k D S OUTPUT [--seed SEED]
 ```
 
 | Parameter | Meaning |
@@ -55,7 +56,7 @@ For example, generate 2 independent sets for seeds of length up to 8,
 	where the hash residues is set to 64:
 
 ```sh
-build/subseqhash3 tables 8 64 2 shared.piv --seed 42
+subseqhash3 tables 8 64 2 shared.piv --seed 42
 ```
 
 The same file can be reused by both seeding modes (see below). 
@@ -78,8 +79,8 @@ the total W seeds.
 Use the following commands for seedings:
 
 ```text
-build/subseqhash3 seeds-sub INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
-build/subseqhash3 seeds-ind INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
+subseqhash3 seeds-sub INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
+subseqhash3 seeds-ind INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
 ```
 
 | Parameter | Meaning |
@@ -106,8 +107,8 @@ For example, seed two sequences using the tables generated above:
 
 ```sh
 printf '%s\n' ACGTACGTACGT ACGTTCGTACGT > input.seq
-build/subseqhash3 seeds-sub input.seq 8 1 64 3 2 sub.csv shared.piv
-build/subseqhash3 seeds-ind input.seq 8 1 64 3 2 ind.csv shared.piv
+subseqhash3 seeds-sub input.seq 8 1 64 3 2 sub.csv shared.piv
+subseqhash3 seeds-ind input.seq 8 1 64 3 2 ind.csv shared.piv
 ```
 
 Each sequence has 5 length-8 windows, with 6 seeds per window (R = 3 and S = 2), so each CSV
