@@ -74,3 +74,23 @@ rename and re-organize the files/functions. first, the project is named "subseqh
   subseqhash_edits_i8 as subseqhash3; compile everything into only one binary, which can carry multiple functions; for examples: "subseqhash3
   simulate ..." which simulate pairs of strings; "subseqhash3 seeds ..." which generate seeds; "subseqhash3 collisions ..." which estimate
   probability of hash-collision using the input files; "subseqhash3 test ..." which does some tests; show me your plan before conducting changes
+
+write a new function, that computes just one seed for a given subsequence, by applying exactly one substitutions and E deletions, 
+where E is the input parameter; does not change existing functions, and you may reuse existing functions;
+you need to make it really fast, by using SIMD, or other algorithmic ideas; note that, it should be much faster
+than calling subseqhash3_compute_all_edit_splits, as subseqhash3_compute_all_edit_splits generates E seeds,
+while in this new function, only one seed is required
+
+can you make this new function really really fast, say 10x speedup comparing with all splits? think out of box, as now only exactly one
+  substitution is allowed and the given E deletions; you may consider different ways of organizing states and SIMD, and other algorithmic ideas;
+  think hard, and again, think out of box
+
+subseqhash2 generates k seeds in a single run, using different pivots,
+where each seed is the smallest subsequence (i.e., deletion-only) of of an order;
+see the source code in folder subseqhash2 and the corresponding paper in subseqhash2-paper.pdf.
+I want you to extend it to generate k seeds, where each seed is the smallest
+sequence by applying exactly one deletion and E substitutions, over one of the k orders.
+k should be n - 1 (I think).
+The orders should be defined in a similar way as in subseqhash2.
+Given any repeating number r,
+the resulting implementation (using subseqhash2 idea) should be much faster than repeating your above implementation r time.

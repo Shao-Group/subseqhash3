@@ -6,10 +6,17 @@ an alternative hash order with different scores and seeds.
 
 ## Build and check
 
+Requires a C99 compiler (GCC or Clang), GNU Make, and a POSIX environment
+with `getline` and `clock_gettime`. The test suite also requires Python 3.
+
 ```sh
 make
 make test
 ```
+
+The executable is `build/subseqhash3`. Run `build/subseqhash3 --help` or
+`build/subseqhash3 <command> --help` for usage. Use `CC`, `CFLAGS`, and
+`BUILD_DIR` to customize the compiler, flags, and output directory.
 
 The normal build uses scalar kernels. For an AVX-512F/BW/VL CPU:
 
@@ -22,6 +29,22 @@ make BUILD_DIR=build/simd \
 The SIMD binary requires compatible hardware; there is no runtime CPU dispatch.
 All seeding is single-threaded.
 
+## Quick start
+
+Create a small input and generate reproducible seeds with both edit models:
+
+```sh
+printf '%s\n' ACGTACGTACGT ACGTTCGTACGT > input.seq
+build/subseqhash3 tables 8 64 2 shared.piv --seed 42
+build/subseqhash3 seeds-sub input.seq 8 1 64 3 2 sub.csv shared.piv
+build/subseqhash3 seeds-ind input.seq 8 1 64 3 2 ind.csv shared.piv
+head -n 7 sub.csv
+```
+
+Each 12-base sequence has five length-8 windows. With three pivots from
+each of two sets, each CSV contains 60 data rows plus a header. Both modes
+produce length-7 seeds here; `seeds-sub` also makes exactly one substitution.
+
 ## Commands
 
 ```text
@@ -29,25 +52,29 @@ subseqhash3 tables W D S OUTPUT [--seed SEED]
 subseqhash3 seeds-sub INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
 subseqhash3 seeds-ind INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
 subseqhash3 collisions sub|ind PAIRS_FILE E D R S [TABLE_FILE] [--inward] [--seed SEED] [--jaccard]
-subseqhash3 simulate ...
+subseqhash3 simulate N n Es Ed Ei OUTPUT
 subseqhash3 test
 ```
 
-`W` is the window length and `D` is the number of hash residues. `S` is the
-number of independent table sets. **`R` is the number of leading pivots used
+`W` is the window length and `D` is the positive number of hash residues;
+D need not be a power of two. `S` is the positive number of independent
+table sets. **`R` is the number of leading pivots used
 from each set**, so each window produces **R*S seeds**. Set selection and
 pivot selection are separate; increasing R does not create independent sets.
 Different orders may select the same seed string.
 
-| Command | Exact edits per window | Window limits | Pivots per set |
-|:---|:---|:---|:---|
-| `seeds-sub` | One deletion and E substitutions | 2<=W<=257; 0<=E<W | 1<=R<=W-1 |
-| `seeds-ind` | E deletions, no substitutions | 1<=W<=256; 0<=E<W | 1<=R<=W-E |
+| Command | Exact edits per window | Seed length | Window limits | Pivots per set |
+|:---|:---|:---|:---|:---|
+| `seeds-sub` | One deletion and E substitutions | W-1 | 2<=W<=257; 0<=E<W | 1<=R<=W-1 |
+| `seeds-ind` | E deletions, no substitutions | W-E | 1<=W<=256; 0<=E<W | 1<=R<=W-E |
 
 Both commands select pivots 0 through R-1 from every set. Input contains one
 ACGT sequence per line, in either case; it is not FASTA/FASTQ. Every length-W
 window is emitted, advancing one base at a time. Invalid DNA, empty lines and
 sequences shorter than W are rejected.
+Seeds are written as uppercase DNA. Output is streamed per window, while
+each input line is read into memory. Seeding elapsed wall time is printed
+to stderr.
 
 For W=30, R=5, S=3, every window produces 15 seeds: pivots 0–4 from set 0,
 then pivots 0–4 from set 1, then pivots 0–4 from set 2.
@@ -63,11 +90,14 @@ build/subseqhash3 seeds-ind input.seq 30 4 1024 5 3 ind.csv shared.piv
 build/subseqhash3 seeds-sub input.seq 30 4 1024 5 3 inward.csv shared.piv --inward
 ```
 
-`tables` uses W consistently with the seeding commands. Each set reserves
-min(W,256) table rows, including capacity for `seeds-ind` with E=0. The
-on-disk row-capacity header remains compatible with existing pivot files;
+`tables` accepts 1<=W<=257 and uses W consistently with the seeding commands.
+Each set reserves min(W,256) table rows, including capacity for `seeds-ind`
+with E=0. The on-disk row-capacity header remains compatible with existing pivot files;
 older files can be reused when they contain enough rows, matching D, and at
 least S sets. If a file has extra sets, the first S are used.
+Specifically, `seeds-sub` needs at least W-1 rows per set and `seeds-ind`
+needs at least W-E. These are binary pivot files; legacy `.abc` and
+SubseqHash2 text tables are not accepted by the CLI.
 
 Omit TABLE_FILE to create `OUTPUT.piv`; add `--seed` for reproducible creation:
 
@@ -76,6 +106,8 @@ build/subseqhash3 seeds-sub input.seq 30 4 1024 5 3 sub.csv --seed 42
 ```
 
 `--seed` applies only to table creation and cannot accompany TABLE_FILE.
+Automatic table creation prints the chosen seed to stderr. Reusing a table
+file fixes the table parameters across invocations.
 The former `seeds`, `repeats`, and `deletions` commands, `tables --pivots`,
 and the `--subseqhash2-tables` option are removed. Retained low-level C
 functions support legacy algorithms and text-table import.
@@ -121,13 +153,36 @@ set/pivot's collision probability. Independent-table trials are not pooled
 with pivot orders. `--jaccard` adds exact edit-neighborhood Jaccard statistics;
 this can be expensive. Without TABLE_FILE, tables are saved to `PAIRS_FILE.piv`.
 
+## Simulate string pairs
+
+```sh
+build/subseqhash3 simulate 100 30 2 1 1 pairs.csv
+build/subseqhash3 collisions sub pairs.csv 2 64 3 2 --seed 42
+```
+
+`simulate N n Es Ed Ei OUTPUT` generates N headerless `STRING1,STRING2`
+rows. The first string has length n; the second has length n-Ed+Ei.
+Every pair has edit distance Es+Ed+Ei and an optimal edit path with exactly
+Es substitutions, Ed deletions and Ei insertions. The example generates
+100 pairs of length-30 strings at edit distance 4, then evaluates their
+substitution-mode seed collisions.
+
+Ed must not exceed n, and Es must not exceed n-Ed. Simulation is deterministic
+for the same numeric arguments and has no `--seed` option. It rejects
+candidates whose edit distance is smaller than requested, so generation
+can be slow for demanding edit budgets.
+
 ## C interface
 
 Include [src/ssh3_seeding.h](src/ssh3_seeding.h) for
 `subseqhash3_seeds_sub()` and `subseqhash3_seeds_ind()`. Both accept shared
 pivot tables, R, S, and a traversal, and emit one borrowed batch of R*S
 results per window. Result index `set*R+pivot` identifies the table set and
-pivot. Passing length==W handles a single window. Result positions are
+pivot. Encode input DNA as 0..3 for A/C/G/T. Callback results and their buffers
+are valid only until the callback returns; copy any data you need to retain.
+Return nonzero from a callback to cancel. Both entry points return 0 on
+success and -1 on invalid input, failure or cancellation.
+Passing length==W handles a single window. Result positions are
 relative to the window; add window_start for absolute positions.
 `SUBSEQHASH3_OUTWARD` is zero and `SUBSEQHASH3_INWARD` selects inward traversal.
 Both modes share outward anchor DPs across windows separately for every set.
@@ -149,6 +204,8 @@ The existing benchmark reports retain their recorded measurements and
 historical command syntax where noted. Current examples are in
 [SEEDING.md](bench/SEEDING.md).
 
+* [Exact-output runtime improvements and differential validation](bench/EXACT-SEED-SPEED.md).
+* [Earlier seeding runtime and memory measurements](bench/SEED-RUNTIME.md).
 * [Outward single-window and long-sequence speed measurements](bench/OUTWARD_SPEED.md).
 * [Sliding-window algorithms and original measurements](bench/WINDOWS.md).
 * [Traversal optimization](bench/TRAVERSAL_OPTIMIZATION.md).
