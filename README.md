@@ -103,16 +103,19 @@ subseqhash3 seeds-ind INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEE
 
 Each window produces R*S seeds. 
 
-For example, seed two sequences using the tables generated above:
+For example, seed two sequences using the tables generated above, with
+2 substitutions for `seeds-sub` and 3 deletions for `seeds-ind`:
 
 ```sh
 printf '%s\n' ACGTACGTACGT ACGTTCGTACGT > input.seq
-subseqhash3 seeds-sub input.seq 8 1 64 3 2 sub.csv shared.piv
-subseqhash3 seeds-ind input.seq 8 1 64 3 2 ind.csv shared.piv
+subseqhash3 seeds-sub input.seq 8 2 64 3 2 sub.csv shared.piv
+subseqhash3 seeds-ind input.seq 8 3 64 3 2 ind.csv shared.piv
 ```
 
 Each sequence has 5 length-8 windows, with 6 seeds per window (R = 3 and S = 2), so each CSV
-contains 60 data rows plus a header. Both examples produce length-7 seeds.
+contains 60 data rows plus a header. The `seeds-sub` example produces length-7
+seeds (2 substitutions and 1 deletion), while `seeds-ind` produces length-5
+seeds (3 deletions).
 
 Both seeding commands write the following CSV header:
 
