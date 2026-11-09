@@ -100,8 +100,7 @@ build/subseqhash3 seeds-ind INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--se
 | `seeds-sub` | 2<=W<=257 | 0<=E<W | W-1 | 1<=R<=W-1 |
 | `seeds-ind` | 1<=W<=256 | 0<=E<W | W-E | 1<=R<=W-E |
 
-Each window produces R*S seeds: pivots 0 through R-1 from each of the
-first S sets. Orders within a set share its tables.
+Each window produces R*S seeds. 
 
 For example, seed two sequences using the tables generated above:
 
@@ -111,15 +110,8 @@ build/subseqhash3 seeds-sub input.seq 8 1 64 3 2 sub.csv shared.piv
 build/subseqhash3 seeds-ind input.seq 8 1 64 3 2 ind.csv shared.piv
 ```
 
-Each sequence has five windows, with six seeds per window (R = 3 and S = 2), so each CSV
+Each sequence has 5 length-8 windows, with 6 seeds per window (R = 3 and S = 2), so each CSV
 contains 60 data rows plus a header. Both examples produce length-7 seeds.
-
-Omitting TABLE_FILE creates `OUTPUT.piv` and prints the chosen table seed
-to stderr. For example:
-
-```sh
-build/subseqhash3 seeds-sub input.seq 8 1 64 3 2 sub-auto.csv --seed 42
-```
 
 Both seeding commands write the following CSV header:
 
@@ -129,16 +121,12 @@ set,pivot,sequence,window_start,substitutions,deletions,seed,psi,omega
 
 | Column | Meaning |
 |:---|:---|
-| `set` | Zero-based independent table-set index. |
-| `pivot` | Zero-based distinguished position in the output seed. |
-| `sequence` | Zero-based input line index. |
-| `window_start` | Zero-based window offset within the input sequence. |
-| `substitutions` | Number of substitutions used: E for `seeds-sub`, 0 for `seeds-ind`. |
-| `deletions` | Number of deletions used: 1 for `seeds-sub`, E for `seeds-ind`. |
-| `seed` | Selected DNA seed, written in uppercase. |
-| `psi`, `omega` | Hash scores used to select the seed: minimize psi, then maximize omega. |
+| `set` | zero-based independent table-set index. |
+| `pivot` | zero-based distinguished order in the output seed. |
+| `sequence` | zero-based input line index. |
+| `window_start` | zero-based window offset within the input sequence. |
+| `substitutions` | number of substitutions used: E for `seeds-sub`, 0 for `seeds-ind`. |
+| `deletions` | number of deletions used: 1 for `seeds-sub`, E for `seeds-ind`. |
+| `seed` | selected DNA seed, written in uppercase. |
+| `psi`, `omega` | hash scores used to select the seed: minimize psi, then maximize omega. |
 
-Rows are ordered by sequence, window start, set, then pivot. A length-L
-sequence produces `(L-W+1)*R*S` rows. Output is streamed per window, while
-each input line is read into memory. Elapsed seeding wall time is printed
-to stderr.
