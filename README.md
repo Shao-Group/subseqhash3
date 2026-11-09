@@ -1,8 +1,8 @@
 # SubseqHash3
 
-SubseqHash3 generates multiple pivot-based DNA seeds with exact edit budgets.
-Both seeding commands use outward traversal by default; `--inward` selects
-an alternative hash order with different scores and seeds.
+SubseqHash3 implements a seeding method designed to tolerate edits.
+Current version provides two modes: subseqhash3-sub and subseqhash3-ind,
+for data with more substitutions and data with more indels, respectively.
 
 ## Build and check
 
@@ -31,7 +31,7 @@ All seeding is single-threaded.
 
 ## Quick start
 
-Create a small input and generate reproducible seeds with both edit models:
+Create a small input and generate reproducible seeds with both modes:
 
 ```sh
 printf '%s\n' ACGTACGTACGT ACGTTCGTACGT > input.seq
@@ -51,7 +51,6 @@ produce length-7 seeds here; `seeds-sub` also makes exactly one substitution.
 subseqhash3 tables W D S OUTPUT [--seed SEED]
 subseqhash3 seeds-sub INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
 subseqhash3 seeds-ind INPUT W E D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]
-subseqhash3 collisions sub|ind PAIRS_FILE E D R S [TABLE_FILE] [--inward] [--seed SEED] [--jaccard]
 subseqhash3 simulate N n Es Ed Ei OUTPUT
 subseqhash3 test
 ```
