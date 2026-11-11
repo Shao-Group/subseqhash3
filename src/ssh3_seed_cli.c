@@ -33,6 +33,24 @@ static void help(FILE *out,int ind) {
         ind?"W-E":"W-1");
 }
 
+static void help_general(FILE *out) {
+    fputs("Generate pivot seeds with exactly Ed deletions and Es substitutions (outward by default).\n\n"
+        "Usage:\n  subseqhash3 seeds INPUT W Es Ed D R S OUTPUT [TABLE_FILE] [--inward] [--seed SEED]\n\n"
+        "  INPUT       DNA sequences, one per line, A/C/G/T in either case.\n"
+        "  W           Sliding-window length, 1..257; advance one base per window.\n"
+        "  Es          Exactly Es substitutions of retained bases; 0<=Es<=W-Ed.\n"
+        "  Ed          Exactly Ed deletions; 0<=Ed<W and W-Ed<=256. Seed length W-Ed.\n"
+        "  D           Positive number of hash residues.\n"
+        "  R           Seeds per table set, 1..W-Ed; use pivots 0..R-1.\n"
+        "  S           Positive number of independent table sets to use.\n"
+        "              Each window produces R*S seeds, in set/pivot order.\n"
+        "  OUTPUT      Destination CSV; set/pivot/sequence/window_start are zero-based.\n"
+        "  TABLE_FILE  Optional shared pivot tables; matching D, at least S sets.\n"
+        "  --inward    Alternative inward traversal (changes scores and seeds).\n"
+        "  --seed SEED Reproducible table creation when TABLE_FILE is omitted.\n\n"
+        "seeds-sub W E equals seeds W E 1; seeds-ind W E equals seeds W 0 E.\n",out);
+}
+
 typedef struct { FILE *out; size_t sequence,r; } CSV;
 static char *append_unsigned(char *out,uint64_t value) {
     if (value<10) { *out++=(char)('0'+value); return out; }
@@ -148,16 +166,22 @@ static int single_seed(SingleWindow *w,const uint8_t *s,size_t n,size_t e,
     subseqhash3_edit_results_destroy(w->sub,w->total); return failed;
 }
 
-static int seeds_main(int argc,char **argv,int ind) {
-    const char *args[8]; size_t argc_pos=0,capacity=0,sequence=0;
-    uint64_t values[5],seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
+/* mode 0: seeds-sub, 1: seeds-ind, 2: general seeds. */
+static int seeds_main(int argc,char **argv,int mode) {
+    const int ind=mode==1,general=mode==2;
+    const size_t npos=general?8:7,nnum=general?6:5;
+    const char *args[9]; size_t argc_pos=0,capacity=0,sequence=0;
+    uint64_t values[6],seed=(uint64_t)time(NULL)^((uint64_t)clock()<<32);
     int inward=0,seed_set=0,status=EXIT_FAILURE;
     SubseqHash3PivotTableFile tables={0};
     SingleWindow single={0};
     FILE *input=NULL,*output=NULL;
     char *generated=NULL,*line=NULL; uint8_t *encoded=NULL;
     struct timespec before,after;
-    if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) { help(stdout,ind); return 0; }
+    if (argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))) {
+        if (general) help_general(stdout); else help(stdout,ind);
+        return 0;
+    }
     for (int i=1;i<argc;++i) {
         if (!strcmp(argv[i],"--inward")) {
             if (inward) goto invalid;
@@ -166,26 +190,33 @@ static int seeds_main(int argc,char **argv,int ind) {
             if (seed_set || i+1>=argc || ssh3_cli_number(argv[++i],&seed)) goto invalid;
             seed_set=1;
         } else {
-            if (!strncmp(argv[i],"--",2) || argc_pos==8) goto invalid;
+            if (!strncmp(argv[i],"--",2) || argc_pos==npos+1) goto invalid;
             args[argc_pos++]=argv[i];
         }
     }
-    if (argc_pos<7 || (argc_pos==8 && seed_set)) goto invalid;
-    for (size_t i=0;i<5;++i) if (ssh3_cli_number(args[i+1],values+i) || values[i]>SIZE_MAX) goto invalid;
-    const size_t w=(size_t)values[0],e=(size_t)values[1],d=(size_t)values[2],r=(size_t)values[3],sets=(size_t)values[4];
-    if (w<(ind?1u:2u) || w>(ind?256u:257u) || e>=w || !d || !r ||
+    if (argc_pos<npos || (argc_pos==npos+1 && seed_set)) goto invalid;
+    for (size_t i=0;i<nnum;++i) if (ssh3_cli_number(args[i+1],values+i) || values[i]>SIZE_MAX) goto invalid;
+    const size_t w=(size_t)values[0],off=general?1:0;
+    const size_t es=general?(size_t)values[1]:ind?0:(size_t)values[1];
+    const size_t ed=general?(size_t)values[2]:ind?(size_t)values[1]:1;
+    const size_t e=(size_t)values[1],d=(size_t)values[2+off],r=(size_t)values[3+off],sets=(size_t)values[4+off];
+    if (general) {
+        if (!w || w>257 || ed>=w || w-ed>256 || es>w-ed || !d || !r || r>w-ed ||
+            !sets || sets>SIZE_MAX/r) goto invalid;
+    } else if (w<(ind?1u:2u) || w>(ind?256u:257u) || e>=w || !d || !r ||
         r>(ind?w-e:w-1) || !sets || sets>SIZE_MAX/r) goto invalid;
-    if (ssh3_cli_alias(args[0],args[6]) || (argc_pos==8 && ssh3_cli_alias(args[7],args[6]))) {
+    const char *out_path=args[npos-1],*table_path=argc_pos==npos+1?args[npos]:NULL;
+    if (ssh3_cli_alias(args[0],out_path) || (table_path && ssh3_cli_alias(table_path,out_path))) {
         fputs("OUTPUT must not alias INPUT or TABLE_FILE\n",stderr); goto done;
     }
     input=fopen(args[0],"r"); if (!input) { perror(args[0]); goto done; }
     if (clock_gettime(CLOCK_MONOTONIC,&before)) goto done;
-    if (ssh3_cli_tables(&tables,argc_pos==8?args[7]:NULL,&generated,args[6],args[0],
-        w,d,sets,ind?w-e:w-1,seed)) goto done;
-    if (ssh3_cli_alias(args[6],argc_pos==8?args[7]:generated)) {
+    if (ssh3_cli_tables(&tables,table_path,&generated,out_path,args[0],
+        w,d,sets,w-ed,seed)) goto done;
+    if (ssh3_cli_alias(out_path,table_path?table_path:generated)) {
         fputs("OUTPUT aliases the active table file\n",stderr); goto done;
     }
-    output=fopen(args[6],"w"); if (!output) { perror(args[6]); goto done; }
+    output=fopen(out_path,"w"); if (!output) { perror(out_path); goto done; }
     if (fputs("set,pivot,sequence,window_start,substitutions,deletions,seed,psi,omega\n",output)==EOF) goto done;
     ssize_t got;
     while ((got=getline(&line,&capacity,input))>=0) {
@@ -200,7 +231,9 @@ static int seeds_main(int argc,char **argv,int ind) {
             encoded[j]=(uint8_t)((base-alphabet)%4);
         }
         CSV csv={output,sequence,r};
-        int failed=len==w?single_seed(&single,encoded,w,e,tables.tables,r,sets,ind,inward,&csv):
+        int failed=general?subseqhash3_seeds(encoded,len,w,es,ed,tables.tables,r,sets,
+                inward?SUBSEQHASH3_INWARD:SUBSEQHASH3_OUTWARD,write_sub,&csv):
+            len==w?single_seed(&single,encoded,w,e,tables.tables,r,sets,ind,inward,&csv):
             ind?subseqhash3_seeds_ind(encoded,len,w,e,tables.tables,r,sets,
                 inward?SUBSEQHASH3_INWARD:SUBSEQHASH3_OUTWARD,write_ind,&csv):
             subseqhash3_seeds_sub(encoded,len,w,e,tables.tables,r,sets,
@@ -218,7 +251,9 @@ done:
     subseqhash3_pivot_table_file_close(&tables);
     free(generated); free(line); free(encoded); return status;
 invalid:
-    help(stderr,ind); return EXIT_FAILURE;
+    if (general) help_general(stderr); else help(stderr,ind);
+    return EXIT_FAILURE;
 }
 int ssh3_seeds_sub_main(int argc,char **argv) { return seeds_main(argc,argv,0); }
 int ssh3_seeds_ind_main(int argc,char **argv) { return seeds_main(argc,argv,1); }
+int ssh3_seeds_main(int argc,char **argv) { return seeds_main(argc,argv,2); }

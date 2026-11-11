@@ -33,6 +33,16 @@ int subseqhash3_seeds_ind(const uint8_t *sequence,size_t length,size_t window,
     size_t pivots_per_set,size_t sets,SubseqHash3Traversal traversal,
     SubseqHash3IndSeedsCallback callback,void *context);
 
+/* General neighborhood: exactly Ed deletions and exactly Es substitutions of
+   retained bases; seed length k=W-Ed. 1<=W<=257, Ed<W, k<=256, Es<=k,
+   1<=R<=k. seeds_sub equals Es=E,Ed=1 and seeds_ind equals Es=0,Ed=E (same
+   orders, identical psi/omega; tied witnesses may differ). Results use the
+   SubseqHash3EditResult layout of seeds_sub, positions relative to the window. */
+int subseqhash3_seeds(const uint8_t *sequence,size_t length,size_t window,
+    size_t substitutions,size_t deletions,const SubseqHash3PivotTables *tables,
+    size_t pivots_per_set,size_t sets,SubseqHash3Traversal traversal,
+    SubseqHash3SubSeedsCallback callback,void *context);
+
 #ifdef __cplusplus
 }
 #endif

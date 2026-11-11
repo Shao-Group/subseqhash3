@@ -13,7 +13,7 @@ SIMD_CFLAGS ?= -O3 -mavx512f -mavx512bw -mavx512vl -mtune=skylake-avx512
 PROGRAM := $(BUILD_DIR)/subseqhash3
 SOURCES := main.c subseqhash3.c table_file.c ssh3_simulate.c \
 	ssh3_tables.c ssh3_collisions.c ssh3_test.c ssh3_pivots.c \
-	pivot_table_file.c ssh3_seed_cli.c ssh3_deletions.c
+	pivot_table_file.c ssh3_seed_cli.c ssh3_deletions.c ssh3_general.c
 OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(OBJECTS:.o=.d)
 
@@ -31,13 +31,14 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 $(PROGRAM): $(OBJECTS)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: $(PROGRAM) $(BUILD_DIR)/check-repeats $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/check-windows $(BUILD_DIR)/check-seeding
+test: $(PROGRAM) $(BUILD_DIR)/check-repeats $(BUILD_DIR)/check-deletions $(BUILD_DIR)/bench-pivots $(BUILD_DIR)/check-windows $(BUILD_DIR)/check-seeding $(BUILD_DIR)/check-general
 	$(PROGRAM) test
 	$(BUILD_DIR)/bench-pivots --check-only
 	$(BUILD_DIR)/check-deletions 2>$(BUILD_DIR)/deletions-test.log || { cat $(BUILD_DIR)/deletions-test.log >&2; exit 1; }
 	$(BUILD_DIR)/check-repeats 2>$(BUILD_DIR)/repeats-test.log || { cat $(BUILD_DIR)/repeats-test.log >&2; exit 1; }
 	$(BUILD_DIR)/check-windows
 	$(BUILD_DIR)/check-seeding
+	$(BUILD_DIR)/check-general
 	python3 tests/cli.py --executable $(PROGRAM)
 
 $(BUILD_DIR)/check-repeats: tests/repeats.c $(BUILD_DIR)/subseqhash3.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/pivot_table_file.o
@@ -224,3 +225,9 @@ bench-windows: $(BUILD_DIR)/bench-windows
 
 $(BUILD_DIR)/check-seeding: tests/seeding.c $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(BUILD_DIR)/check-general: tests/general.c $(BUILD_DIR)/ssh3_general.o $(BUILD_DIR)/ssh3_deletions.o $(BUILD_DIR)/ssh3_pivots.o $(BUILD_DIR)/subseqhash3.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+check-general: $(BUILD_DIR)/check-general
+	$(BUILD_DIR)/check-general
