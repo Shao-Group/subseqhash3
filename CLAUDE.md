@@ -26,20 +26,26 @@ left prefix in normal order, right suffix reversed.
   needs rows >= W-Ed.
 
 ## General solver (ssh3_general.c)
-- Side DP `GSide`: index ((len*(Ed+1)+h)*(Es+1)+e)*d + j, len = side input
-  bases consumed, h deletions, e substitutions, j residue; exact int64 min/max,
-  GINF sentinels. Retention tries all 4 output bases (delta = base != input).
-  Left side capped at retained length R-1.
-- Join (`gjoin`): pivot output p, input pivot b=p+h (h=0..Ed), all pivot
-  bases sigma and splits eL+eR+delta=Es. psi search scans targets 0..best
-  (worst O(d^2)), omega scan O(d).
-- Traceback recomputes predecessors from exact scores (deletion preferred).
+- Side DP `GSide`: block per (len,h,e) = Lc row then Uc row, uint16 compact
+  costs (M=127: Lc=M*l+min omega, Uc=M*l-max omega; sign -1 swaps Lc/Uc),
+  saturating adds, 0xFFFF sentinel. Row stride holds d residues + 32-entry
+  circular tail (row[d+i]=row[i mod d]) + cached row min at d+32 (valid flag
+  d+33). len = side input bases consumed, h deletions, e substitutions.
+  Retention tries all 4 output bases (delta = base != input); e limited to
+  [gemin(l), gemax(l)]. Left side capped at retained length R-1.
+- Tables `GTab`: int8 A, sign bitmask `neg`; right side stored at reflected
+  residue v=-j mod d so the join is a circular vector sum (v2 = j1+C_P-psi).
+- Join: pivot output p, input pivot b=p+h (h=0..Ed), all pivot bases sigma,
+  splits eL+eR+delta=Es; row-min lower bounds prune. AVX-512 path (G_SIMD,
+  needs F/BW/VL) plus scalar fallback; `-DGPROF_PHASES` prints build/join/
+  trace cycle counts.
+- Traceback recomputes predecessors from exact costs (deletion preferred).
 - Outward: anchor-oriented; for anchor a, windows a-(R-1+Ed)..a; circular
   buffer of R+Ed window slots; window w emitted after anchor w+R-1+Ed.
   Inward: per-window prefix/suffix DPs.
-- Scalar, not yet optimized. Speed ideas: 16-bit compact costs + SIMD as in
-  supp. Note 3, reflected-residue O(d) joins, prune infeasible (h,e) states,
-  avoid redundant memcpy for deletion transitions.
+- Optimized 2026-11-11: 9-40x over the int64 scalar version (AVX-512 build,
+  identical psi/omega). Remaining ideas: prune infeasible (h,e) states further,
+  avoid redundant copies for deletion transitions.
 
 ## Tests
 `make test` (tests/ and bench/ are gitignored, local only). `tests/general.c`
