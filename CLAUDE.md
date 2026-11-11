@@ -29,23 +29,38 @@ left prefix in normal order, right suffix reversed.
 - Side DP `GSide`: block per (len,h,e) = Lc row then Uc row, uint16 compact
   costs (M=127: Lc=M*l+min omega, Uc=M*l-max omega; sign -1 swaps Lc/Uc),
   saturating adds, 0xFFFF sentinel. Row stride holds d residues + 32-entry
-  circular tail (row[d+i]=row[i mod d]) + cached row min at d+32 (valid flag
-  d+33). len = side input bases consumed, h deletions, e substitutions.
-  Retention tries all 4 output bases (delta = base != input); e limited to
-  [gemin(l), gemax(l)]. Left side capped at retained length R-1.
+  circular tail (row[d+i]=row[i mod d]). len = side input bases consumed,
+  h deletions, e substitutions. Retention tries all 4 output bases (delta =
+  base != input); e limited to [gemin(l), gemax(l)]. Left side capped at
+  retained length R-1. Start blocks (h,h,0) are set once per GSide (`ready`).
 - Tables `GTab`: int8 A, sign bitmask `neg`; right side stored at reflected
   residue v=-j mod d so the join is a circular vector sum (v2 = j1+C_P-psi).
+  SIMD-only `prep` (16-bit M+a per level/chunk/row; kernel derives M-a) and
+  `negs`, built once per table set.
+- Build kernel `gtarget` (SIMD): one target block per sweep over chunks,
+  per-level wrapped offsets `qt` (no wrap branches), two blends for the
+  swap. Row minima for join-final levels (l>=minl) go to dense `mins` and
+  per-residue-mod-32 minima `mm` (lane-wise min over chunks, stored twice).
 - Join: pivot output p, input pivot b=p+h (h=0..Ed), all pivot bases sigma,
-  splits eL+eR+delta=Es; row-min lower bounds prune. AVX-512 path (G_SIMD,
-  needs F/BW/VL) plus scalar fallback; `-DGPROF_PHASES` prints build/join/
-  trace cycle counts.
+  splits eL+eR+delta=Es. Once psi=0 is known, candidates are sorted by an
+  omega upper bound (mod-32 class minima paired at shift C_P when 32|d, else
+  row minima) and pruned; ties keep (sigma,el) order so output is unchanged.
+  psi>0 search `gpsi` uses reachability bitsets (nearest partner, clz/ctz).
+  AVX-512 path (G_SIMD, needs F/BW/VL) plus scalar fallback; `-DGPROF_PHASES`
+  prints lbuild/build/join/trace cycle counts.
 - Traceback recomputes predecessors from exact costs (deletion preferred).
 - Outward: anchor-oriented; for anchor a, windows a-(R-1+Ed)..a; circular
-  buffer of R+Ed window slots; window w emitted after anchor w+R-1+Ed.
-  Inward: per-window prefix/suffix DPs.
-- Optimized 2026-11-11: 9-40x over the int64 scalar version (AVX-512 build,
-  identical psi/omega). Remaining ideas: prune infeasible (h,e) states further,
-  avoid redundant copies for deletion transitions.
+  buffer of R+Ed window slots; window w emitted after anchor w+R-1+Ed. If the
+  Ed+1 anchors' DPs exceed ~768KB, winners are traced eagerly on improvement
+  (one DP per side, stays in L2); else a ring of Ed+1 DPs and one trace per
+  winner. Inward: per-window prefix/suffix DPs.
+- Optimized 2026-11-11 (7b0206d): 9-40x over the int64 scalar version. Then
+  1.2-3.5x more (wall, D=1024 typical 1.5-2.1x; identical CSV output). Build
+  is ~2/3 of time and near its limit on this Xeon 6148: zmm int ops issue
+  ~1/cycle (no gain over ymm), L1 is 32KB so d=1024 rows stream from L2;
+  measured floor ~2.2 TSC per 32-lane transform, in-program ~6. Tried and
+  rejected (no gain or slower): uint8 increments, level/plane/column-wide
+  chunk-outer kernels (GCC spills), paired targets, software prefetch.
 
 ## Tests
 `make test` (tests/ and bench/ are gitignored, local only). `tests/general.c`
