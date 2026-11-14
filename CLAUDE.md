@@ -48,7 +48,14 @@ left prefix in normal order, right suffix reversed.
   psi>0 search `gpsi` uses reachability bitsets (nearest partner, clz/ctz).
   AVX-512 path (G_SIMD, needs F/BW/VL) plus scalar fallback; `-DGPROF_PHASES`
   prints lbuild/build/join/trace cycle counts.
-- Traceback recomputes predecessors from exact costs (deletion preferred).
+- Small d (SIMD): d<=16 (`GPACK`) packs a block into one vector, Lc lanes
+  0..15 and Uc 16..31 (stride 16); `gtarget_packed` does shift+sign swap in
+  one `permutexvar` per row via `GTab.pidx`. 16<d<32: `gtarget_small`, rows
+  d-periodic over 32 lanes, two-source permute per row; tail 32..63 filled
+  only for join-final levels. 10-13x over d76adbf for d<32.
+- psi>0: reachability bitsets cached per (side,e) within one join call.
+- Traceback recomputes predecessors from exact costs (deletion preferred),
+  using `GTab.tt` ((M+a)|sign<<8) and incremental block offsets.
 - Outward: anchor-oriented; for anchor a, windows a-(R-1+Ed)..a; circular
   buffer of R+Ed window slots; window w emitted after anchor w+R-1+Ed. If the
   Ed+1 anchors' DPs exceed ~768KB, winners are traced eagerly on improvement

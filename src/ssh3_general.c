@@ -44,14 +44,20 @@ __attribute__((destructor)) static void ph_print(void){fprintf(stderr,"lbuild %.
 #endif
 #define GM 127
 #define GSENT 0xFFFFu
+/* SIMD, d<=16: a block is one vector, Lc in lanes 0..15 and Uc in 16..31
+   (row stride 16, entries 0..15 d-periodic). */
+#define GPACK(d) (G_SIMD && (d)<=16)
 
 typedef struct {
     size_t d,dpad,chunks,rows;
     size_t *C;              /* residue increment of each row (reflected on right) */
+    size_t *off;            /* (d-C) mod d: source offset of each row */
     int8_t *A;              /* [row][dpad] signed increment a (B2 folded in) */
     uint32_t *neg;          /* [row][chunks] sign bits, bit set for B1=-1 */
     uint16_t *prep;         /* [l][chunk][4][32]: M+a of rows 4l..4l+3 */
     uint32_t *negs;         /* [l][chunk][4]: their sign masks */
+    uint16_t *tt;           /* [row][d] traceback entry: (M+a) | sign bit << 8 */
+    uint16_t *pidx;         /* d<32: [row][Lc,Uc][32] vpermt2w indices: shift + sign swap */
 } GTab;
 
 /* State block: Lc row (stride entries) then Uc row. Entries d..d+31 hold the
@@ -64,6 +70,7 @@ typedef struct {
     uint32_t *qt;           /* [chunk][4] wrapped source offsets of one level */
     size_t cap,H,E1,stride,d,k,Es;
     size_t ready;           /* start blocks (h,h,0), h<ready, are initialized */
+    uint16_t per[32];       /* d<32: per[i] = (32+i) mod d (row is d-periodic) */
 } GSide;
 
 static void *galloc(size_t bytes) {
@@ -74,7 +81,7 @@ static void *galloc(size_t bytes) {
 }
 
 static void gtab_destroy(GTab *t) {
-    free(t->C); free(t->A); free(t->neg); free(t->prep); free(t->negs);
+    free(t->C); free(t->off); free(t->tt); free(t->pidx); free(t->A); free(t->neg); free(t->prep); free(t->negs);
     memset(t,0,sizeof(*t));
 }
 
@@ -86,9 +93,43 @@ static int gtab_prep(GTab *t) {
     const size_t k=t->rows/4,chunks=t->chunks;
     t->prep=galloc(k*chunks*128*sizeof(uint16_t)); t->negs=malloc(k*chunks*4*sizeof(uint32_t));
     if (!t->prep || !t->negs) return -1;
+    if (t->d<=16) { /* packed: lane i<16 (Lc) reads source lane (i+off) mod d of
+                       Lc, or of Uc (+16) where the target's sign is -1; lane
+                       16+i (Uc) the other one. Then increments M+a | M-a. */
+        t->pidx=galloc(t->rows*64*sizeof(uint16_t));
+        if (!t->pidx) return -1;
+        for (size_t r=0;r<t->rows;++r) for (size_t i=0;i<16;++i) {
+            const size_t v=i%t->d,src=(t->off[r]+i)%t->d;
+            const unsigned ng=(t->neg[r*chunks]>>v)&1u;
+            const int a=t->A[r*t->dpad+v];
+            t->pidx[r*64+i]=(uint16_t)(src+(ng?16:0));
+            t->pidx[r*64+16+i]=(uint16_t)(src+(ng?0:16));
+            t->pidx[r*64+32+i]=(uint16_t)(GM+a);
+            t->pidx[r*64+48+i]=(uint16_t)(GM-a);
+        }
+    } else if (t->d<32) { /* lane i of a target reads source lane (i+off) mod d of Lc,
+                      or of Uc (index +32) where the target's sign is -1 */
+        t->pidx=galloc(t->rows*64*sizeof(uint16_t));
+        if (!t->pidx) return -1;
+        for (size_t r=0;r<t->rows;++r) for (size_t i=0;i<32;++i) {
+            const size_t v=i%t->d,src=(t->off[r]+i)%t->d;
+            const unsigned ng=(t->neg[r*chunks]>>v)&1u;
+            t->pidx[r*64+i]=(uint16_t)(src+(ng?32:0));
+            t->pidx[r*64+32+i]=(uint16_t)(src+(ng?0:32));
+        }
+    }
     for (size_t l=0;l<k;++l) for (size_t c=0;c<chunks;++c) for (unsigned i=0;i<4;++i) {
         const size_t r=4*l+i;
         uint16_t *pl=t->prep+((l*chunks+c)*4+i)*32;
+        if (t->d<32) { /* d-periodic lanes: the kernel then yields d-periodic rows */
+            uint32_t m=0;
+            for (size_t j=0,v=0;j<32;++j,v=v+1==t->d?0:v+1) {
+                pl[j]=(uint16_t)(GM+t->A[r*t->dpad+v]);
+                m|=((t->neg[r*chunks]>>v)&1u)<<j;
+            }
+            t->negs[(l*chunks+c)*4+i]=m;
+            continue;
+        }
         for (size_t j=0;j<32;++j) pl[j]=(uint16_t)(GM+t->A[r*t->dpad+32*c+j]);
         t->negs[(l*chunks+c)*4+i]=t->neg[r*chunks+c];
     }
@@ -100,18 +141,21 @@ static int gtab_prep(GTab *t) {
 static int gtab_init(GTab *t,const SubseqHash3DeletionSide *s,size_t k,size_t d,int reflect) {
     memset(t,0,sizeof(*t));
     t->d=d; t->chunks=(d+31)/32; t->dpad=t->chunks*32; t->rows=4*k;
-    t->C=malloc(t->rows*sizeof(size_t)); t->A=galloc(t->rows*t->dpad);
+    t->C=malloc(t->rows*sizeof(size_t)); t->off=malloc(t->rows*sizeof(size_t));
+    t->tt=malloc(t->rows*d*sizeof(uint16_t)); t->A=galloc(t->rows*t->dpad);
     t->neg=calloc(t->rows*t->chunks,sizeof(uint32_t));
-    if (!t->C || !t->A || !t->neg) { gtab_destroy(t); return -1; }
+    if (!t->C || !t->off || !t->tt || !t->A || !t->neg) { gtab_destroy(t); return -1; }
     memset(t->A,0,t->rows*t->dpad);
     for (size_t r=0;r<t->rows;++r) {
         const size_t c=s->C[r]%d;
         t->C[r]=reflect?(d-c)%d:c;
+        t->off[r]=(d-t->C[r])%d;
         for (size_t v=0;v<d;++v) {
             const size_t j=reflect?(d-v)%d:v;
             const int64_t a=s->A[r*d+j];
             if (a<-GM || a>GM || (s->B1[r*d+j]!=1 && s->B1[r*d+j]!=-1)) { gtab_destroy(t); return -1; }
             t->A[r*t->dpad+v]=(int8_t)a;
+            t->tt[r*d+v]=(uint16_t)((GM+a)|(s->B1[r*d+j]<0?256:0));
             if (s->B1[r*d+j]<0) t->neg[r*t->chunks+v/32]|=UINT32_C(1)<<(v%32);
         }
     }
@@ -146,8 +190,9 @@ static void gmm_row(const uint16_t *row,size_t d,uint16_t *out) {
 #endif
 
 static int gside_reserve(GSide *s,size_t L,size_t H,size_t E1,size_t d,size_t k,size_t Es) {
-    const size_t stride=(d+32+31)/32*32,cells=(L+1)*H*E1*2*stride;
+    const size_t stride=GPACK(d)?16:(d+32+31)/32*32,cells=(L+1)*H*E1*2*stride;
     s->H=H; s->E1=E1; s->d=d; s->stride=stride; s->k=k; s->Es=Es; s->ready=0;
+    for (size_t i=0;i<32;++i) s->per[i]=(uint16_t)((32+i)%d);
     if (cells<=s->cap) return 0;
     free(s->buf); free(s->nil); free(s->mins); free(s->mm);
     s->buf=galloc(cells*sizeof(uint16_t)); s->nil=galloc(E1*2*stride*sizeof(uint16_t));
@@ -166,7 +211,7 @@ static inline uint16_t gadds(uint16_t a,uint16_t b) {
 /* Fill the circular tail; return the row minimum. */
 static inline uint16_t gfinish_row(uint16_t *row,size_t d) {
     uint16_t mn=(uint16_t)GSENT;
-    for (size_t i=0;i<32;++i) row[d+i]=row[i%d];
+    for (size_t i=0,m=0;i<32;++i,m=m+1==d?0:m+1) row[d+i]=row[m];
     for (size_t j=0;j<d;++j) if (row[j]<mn) mn=row[j];
     return mn;
 }
@@ -238,6 +283,64 @@ static inline __attribute__((always_inline)) void gtarget(uint16_t *dst,const ui
 }
 #undef GT
 
+/* d<=16: the block is one vector [Lc|Uc]; one permute per row applies the
+   shift and the sign swap, then the packed increments M+a | M-a. */
+static inline __attribute__((always_inline)) void gtarget_packed(uint16_t *dst,const uint16_t *del,
+    const uint16_t *sp,const uint16_t *kp,const uint16_t *px,size_t d,uint16_t *mout,uint16_t *mmo,
+    const unsigned B,const int SUB,const int KEEP,const int MINS) {
+    const __m512i k=_mm512_load_si512(kp),u=_mm512_load_si512(sp);
+    __m512i acc=_mm512_load_si512(del);
+#define GTP(I) do { const uint16_t *q_=px+(I)*64; \
+        acc=_mm512_min_epu16(acc,_mm512_adds_epu16(_mm512_permutexvar_epi16(_mm512_load_si512(q_),B==(I)?k:u),_mm512_load_si512(q_+32))); \
+        GCNT; } while (0)
+    if ((B==0 && KEEP) || (B!=0 && SUB)) GTP(0);
+    if ((B==1 && KEEP) || (B!=1 && SUB)) GTP(1);
+    if ((B==2 && KEEP) || (B!=2 && SUB)) GTP(2);
+    if ((B==3 && KEEP) || (B!=3 && SUB)) GTP(3);
+#undef GTP
+    _mm512_store_si512(dst,acc);
+    if (MINS) {
+        const __mmask32 mk=(__mmask32)((UINT32_C(1)<<d)-1);
+        const __m512i sent=_mm512_set1_epi16(-1);
+        const __m512i hi=_mm512_permutexvar_epi16(_mm512_add_epi16(_mm512_set_epi16(
+            31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),
+            _mm512_set1_epi16(16)),acc);
+        gstore_mm(mout,mmo,_mm512_mask_mov_epi16(sent,mk,acc),_mm512_mask_mov_epi16(sent,mk,hi));
+    }
+}
+
+/* d<32: every row is one vector (entries 0..31 d-periodic). Sources are
+   loaded aligned (store forwarding from the previous level always works) and
+   one two-source permute per row applies both the shift and the sign swap. */
+static inline __attribute__((always_inline)) void gtarget_small(uint16_t *dst,const uint16_t *del,
+    const uint16_t *sp,const uint16_t *kp,const uint16_t *prep,const uint16_t *pidx,
+    size_t d,size_t stride,uint16_t *mout,uint16_t *mmo,
+    const unsigned B,const int SUB,const int KEEP,const int MINS) {
+    const __m512i c254=_mm512_set1_epi16(2*GM);
+    const __m512i kL=_mm512_load_si512(kp),kU=_mm512_load_si512(kp+stride);
+    const __m512i uL=_mm512_load_si512(sp),uU=_mm512_load_si512(sp+stride);
+    __m512i aL=_mm512_load_si512(del),aU=_mm512_load_si512(del+stride);
+#define GTS(I) do { \
+        const __m512i sL_=B==(I)?kL:uL,sU_=B==(I)?kU:uU; \
+        const __m512i pl_=_mm512_load_si512(prep+(I)*32); \
+        const __m512i tL_=_mm512_permutex2var_epi16(sL_,_mm512_load_si512(pidx+(I)*64),sU_); \
+        const __m512i tU_=_mm512_permutex2var_epi16(sL_,_mm512_load_si512(pidx+(I)*64+32),sU_); \
+        aL=_mm512_min_epu16(aL,_mm512_adds_epu16(tL_,pl_)); \
+        aU=_mm512_min_epu16(aU,_mm512_adds_epu16(tU_,_mm512_sub_epi16(c254,pl_))); \
+        GCNT; } while (0)
+    if ((B==0 && KEEP) || (B!=0 && SUB)) GTS(0);
+    if ((B==1 && KEEP) || (B!=1 && SUB)) GTS(1);
+    if ((B==2 && KEEP) || (B!=2 && SUB)) GTS(2);
+    if ((B==3 && KEEP) || (B!=3 && SUB)) GTS(3);
+#undef GTS
+    _mm512_store_si512(dst,aL); _mm512_store_si512(dst+stride,aU);
+    if (MINS) {
+        const __mmask32 mk=(__mmask32)((UINT32_C(1)<<d)-1);
+        const __m512i sent=_mm512_set1_epi16(-1);
+        gstore_mm(mout,mmo,_mm512_mask_mov_epi16(sent,mk,aL),_mm512_mask_mov_epi16(sent,mk,aU));
+    }
+}
+
 static inline __attribute__((always_inline)) void gplane(const GSide *s,const GTab *t,
     const uint16_t *prep,const uint32_t *negs,const uint32_t *qt,size_t l,size_t h,size_t emin,size_t emax,int mins,const unsigned B) {
     const size_t d=s->d,stride=s->stride,len=l+h,chunks=t->chunks,BS=2*stride;
@@ -248,12 +351,35 @@ static inline __attribute__((always_inline)) void gplane(const GSide *s,const GT
         const uint16_t *del=del0+e*BS,*sp=src0+(e?e-1:0)*BS,*kp=src0+e*BS;
 #define GTGT(SUB,KEEP) do { if (mins) gtarget(dst,del,sp,kp,prep,negs,qt,chunks,d,stride,mo,gmm(s,len,h,e),B,SUB,KEEP,1); \
             else gtarget(dst,del,sp,kp,prep,negs,qt,chunks,d,stride,mo,NULL,B,SUB,KEEP,0); } while (0)
+        if (GPACK(d)) {
+            const uint16_t *px=t->pidx+(l-1)*4*64;
+#define GTPK(SUB,KEEP) do { if (mins) gtarget_packed(dst,del,sp,kp,px,d,mo,gmm(s,len,h,e),B,SUB,KEEP,1); \
+                else gtarget_packed(dst,del,sp,kp,px,d,mo,NULL,B,SUB,KEEP,0); } while (0)
+            if (!e) GTPK(0,1); else if (e>=l) GTPK(1,0); else GTPK(1,1);
+#undef GTPK
+            continue;
+        }
+        if (d<32) {
+            const uint16_t *px=t->pidx+(l-1)*4*64;
+#define GTSM(SUB,KEEP) do { if (mins) gtarget_small(dst,del,sp,kp,prep,px,d,stride,mo,gmm(s,len,h,e),B,SUB,KEEP,1); \
+                else gtarget_small(dst,del,sp,kp,prep,px,d,stride,mo,NULL,B,SUB,KEEP,0); } while (0)
+            if (!e) GTSM(0,1); else if (e>=l) GTSM(1,0); else GTSM(1,1);
+#undef GTSM
+            continue;
+        }
         if (!e) GTGT(0,1); else if (e>=l) GTGT(1,0); else GTGT(1,1);
 #undef GTGT
     }
+    if (GPACK(d)) return;
     for (size_t e=emin;e<=emax;++e) {
-        uint16_t *dst=dst0+e*BS,*mo=gmins(s,len,h,e);
-        if (d<32) { mo[0]=gfinish_row(dst,d); mo[1]=gfinish_row(dst+stride,d); continue; }
+        uint16_t *dst=dst0+e*BS;
+        if (d<32) { /* rows of 64 entries, d-periodic: entries 0..31 already are
+                       (periodic tables); only the join reads entries 32..63 */
+            if (!mins) continue;
+            const __m512i p1=_mm512_loadu_si512(s->per);
+            _mm512_store_si512(dst+32,_mm512_permutexvar_epi16(p1,_mm512_load_si512(dst)));
+            _mm512_store_si512(dst+stride+32,_mm512_permutexvar_epi16(p1,_mm512_load_si512(dst+stride)));
+            continue; }
         _mm512_storeu_si512(dst+d,_mm512_load_si512(dst));
         _mm512_storeu_si512(dst+stride+d,_mm512_load_si512(dst+stride));
     }
@@ -275,7 +401,9 @@ static void gside_build(GSide *s,const uint8_t *x,ptrdiff_t step,size_t L,
     if (s->ready<=Ed) { /* start blocks (h,h,0) are never overwritten: set once */
         uint16_t *b0=gblk(s,0,0,0);
         for (size_t j=0;j<d;++j) b0[j]=b0[stride+j]=(uint16_t)GSENT;
-        b0[0]=b0[stride]=0; gfinish_row(b0,d); gfinish_row(b0+stride,d);
+        b0[0]=b0[stride]=0;
+        if (GPACK(d)) { for (size_t j=d;j<16;++j) b0[j]=b0[16+j]=b0[j%d]; }
+        else { gfinish_row(b0,d); gfinish_row(b0+stride,d); }
         for (size_t h=0;h<=Ed && h<s->H;++h) {
             if (h) memcpy(gblk(s,h,h,0),b0,2*stride*sizeof(uint16_t));
             gmins(s,h,h,0)[0]=gmins(s,h,h,0)[1]=0;
@@ -291,7 +419,7 @@ static void gside_build(GSide *s,const uint8_t *x,ptrdiff_t step,size_t L,
         if (emin>emax) continue;
         const size_t hmax=L-l<Ed?L-l:Ed;
         size_t row[4],off[4];
-        for (unsigned i=0;i<4;++i) { row[i]=4*(l-1)+i; off[i]=(d-t->C[row[i]])%d; }
+        for (unsigned i=0;i<4;++i) { row[i]=4*(l-1)+i; off[i]=t->off[row[i]]; }
 #if G_SIMD
         const uint16_t *prep=t->prep+(l-1)*t->chunks*128;
         const uint32_t *negs=t->negs+(l-1)*t->chunks*4;
@@ -339,38 +467,62 @@ static void gside_build(GSide *s,const uint8_t *x,ptrdiff_t step,size_t L,
     if (maxl<8) { PH_END(ph_lbuild) } else { PH_END(ph_build) }
 }
 
-/* Recover one side string with cost c (kindU: 0=Lc, 1=Uc) at residue j. */
+/* Recover one side string with cost c (kindU: 0=Lc, 1=Uc) at residue j.
+   Tries the deletion, then retention of the input base, then the three
+   substitutions; the common case (plain retention) is predicted well. The
+   block offset of (len-1,h,e) is walked incrementally. */
 static void gside_trace(const GSide *s,const uint8_t *x,ptrdiff_t step,size_t len,
     size_t h,size_t e,size_t j,int kindU,uint16_t c,const GTab *t,
     uint8_t *out_base,size_t *out_off,uint8_t *out_sub) {
-    const size_t d=s->d,stride=s->stride;
+    const size_t d=s->d,stride=s->stride,BS=2*stride,SH=s->E1*BS,SL=s->H*SH;
+    const uint16_t *buf=s->buf,*tt=t->tt; const size_t *off=t->off;
+    unsigned ku=(unsigned)kindU;
+    size_t po=(len-1)*SL+h*SH+e*BS;   /* gblk(len-1,h,e) */
     while (len) {
         const size_t l=len-h;
-        if (h && gblk(s,len-1,h-1,e)[kindU*stride+j]==c) { --len; --h; continue; }
+        if (h && buf[po-SH+ku*stride+j]==c) { --len; --h; po-=SL+SH; continue; }
+        if (!l) return; /* unreachable for a consistent DP */
         const unsigned base=x[(ptrdiff_t)(len-1)*step];
-        int found=0;
-        for (unsigned q=0;q<4 && !found && l;++q) {
-            const unsigned sigma=(base+q)&3;
-            const size_t delta=sigma!=base;
+        const size_t r0=4*(l-1);
+        unsigned q=0;
+        for (;q<4;++q) {
+            const size_t delta=q!=0;
             if (delta>e || e-delta>l-1) continue;
-            const size_t r=4*(l-1)+sigma;
-            const int a=t->A[r*t->dpad+j];
-            const uint16_t inc=(uint16_t)(kindU?GM-a:GM+a);
+            const size_t r=r0+((base+q)&3);
+            const unsigned w=tt[r*d+j],u=w&255u;
+            const uint16_t inc=(uint16_t)(ku?2*GM-u:u);
             if (c<inc) continue;
-            const int neg=(t->neg[r*t->chunks+j/32]>>(j%32))&1;
-            const int pk=neg?!kindU:kindU;
-            const size_t jp=(j+d-t->C[r])%d;
-            if (gblk(s,len-1,h,e-delta)[pk*stride+jp]!=(uint16_t)(c-inc)) continue;
-            out_base[l-1]=(uint8_t)sigma; out_off[l-1]=len-1; out_sub[l-1]=(uint8_t)delta;
-            --len; e-=delta; j=jp; kindU=pk; c=(uint16_t)(c-inc); found=1;
+            const unsigned pk=ku^(w>>8);
+            size_t jp=j+off[r]; jp=jp>=d?jp-d:jp;
+            const size_t pq=po-delta*BS;
+            if (buf[pq+pk*stride+jp]!=(uint16_t)(c-inc)) continue;
+            out_base[l-1]=(uint8_t)((base+q)&3); out_off[l-1]=len-1; out_sub[l-1]=(uint8_t)delta;
+            --len; e-=delta; j=jp; ku=pk; c=(uint16_t)(c-inc); po=pq-SL;
+            break;
         }
-        if (!found) return; /* unreachable for a consistent DP */
+        if (q==4) return; /* unreachable for a consistent DP */
     }
 }
 
 /* min over j<d of a[j] + b[(j+s) mod d] (saturating); b has a circular tail. */
+#if G_SIMD
+/* Entries (j+s) mod d, j<32, of a packed row (d<=16). */
+static inline __m512i grot16(const uint16_t *b,size_t s,size_t d) {
+    const __m512i v=_mm512_add_epi16(_mm512_set_epi16(
+        31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),
+        _mm512_set1_epi16((short)s));
+    const __mmask32 w=_mm512_cmpge_epu16_mask(v,_mm512_set1_epi16((short)d));
+    return _mm512_permutexvar_epi16(_mm512_mask_sub_epi16(v,w,v,_mm512_set1_epi16((short)d)),
+        _mm512_maskz_loadu_epi16(0xFFFFu,b));
+}
+#endif
+
 static uint16_t gminsum(const uint16_t *a,const uint16_t *b,size_t s,size_t d) {
 #if G_SIMD
+    if (GPACK(d)) {
+        const __mmask32 m=(__mmask32)((UINT32_C(1)<<d)-1);
+        return ghmin(_mm512_mask_adds_epu16(_mm512_set1_epi16(-1),m,_mm512_maskz_loadu_epi16(m,a),grot16(b,s,d)));
+    }
     __m512i acc=_mm512_set1_epi16(-1);
     const size_t chunks=(d+31)/32;
     for (size_t c=0;c<chunks;++c) {
@@ -398,7 +550,7 @@ static void gbits(const uint16_t *row,size_t d,uint64_t *w) {
     const __m512i sent=_mm512_set1_epi16(-1);
     for (size_t j0=0;j0<d;j0+=32) {
         const __mmask32 m=j0+32<=d?(__mmask32)0xFFFFFFFFu:(__mmask32)((UINT32_C(1)<<(d-j0))-1);
-        w[j0/64]|=(uint64_t)_mm512_mask_cmpneq_epu16_mask(m,_mm512_loadu_si512(row+j0),sent)<<(j0%64);
+        w[j0/64]|=(uint64_t)_mm512_mask_cmpneq_epu16_mask(m,_mm512_maskz_loadu_epi16(m,row+j0),sent)<<(j0%64);
     }
 #else
     for (size_t j=0;j<d;++j) if (row[j]!=GSENT) w[j/64]|=UINT64_C(1)<<(j%64);
@@ -430,16 +582,22 @@ static size_t gsucc(const uint64_t *w,size_t d,size_t u,size_t maxd) {
     return SIZE_MAX;
 }
 
+/* Reachability bitset of a block (shared by its Lc and Uc rows), computed at
+   most once per join call; returns its popcount. */
+static size_t gbits_cached(const uint16_t *row,size_t d,uint64_t *w,size_t *cnt) {
+    if (*cnt!=SIZE_MAX) return *cnt;
+    gbits(row,d,w);
+    size_t n=0;
+    for (size_t i=0;i<(d+63)/64;++i) n+=(size_t)__builtin_popcountll(w[i]);
+    return *cnt=n;
+}
+
 /* Smallest psi in 1..limit with a reachable pair, or d. Requires psi=0 failed.
    A pair (j1,v2) gives psi=(j1+pc-v2) mod d. Iterates the sparser of the two
    reachable bitsets and searches the other for the nearest partner within the
    current bound. scratch holds 2*ceil(d/64) words. */
-static size_t gpsi(const uint16_t *a,const uint16_t *b,size_t pc,size_t d,size_t limit,uint64_t *scratch) {
+static size_t gpsi(const uint64_t *wa,size_t na,const uint64_t *wb,size_t nb,size_t pc,size_t d,size_t limit) {
     const size_t W=(d+63)/64;
-    uint64_t *wa=scratch,*wb=scratch+W;
-    gbits(a,d,wa); gbits(b,d,wb);
-    size_t na=0,nb=0;
-    for (size_t i=0;i<W;++i) { na+=(size_t)__builtin_popcountll(wa[i]); nb+=(size_t)__builtin_popcountll(wb[i]); }
     if (!na || !nb) return d;
     size_t best=limit<d?limit:d-1; int found=0;
     if (na<=nb) {
@@ -556,6 +714,10 @@ static int gjoin(const GJoin *g,size_t p,size_t k,unsigned xb,size_t h,
         return here;
     }
     int changed=0;
+    /* scratch: left then right block bitsets for e=0..Es; counts unknown yet */
+    const size_t W=(d+63)/64;
+    size_t lcnt[257],rcnt[257];
+    if (best->psi) for (size_t e=0;e<=Es;++e) lcnt[e]=rcnt[e]=SIZE_MAX;
     for (unsigned sigma=0;sigma<4;++sigma) {
         const size_t delta=sigma!=xb;
         if (delta>Es) continue;
@@ -575,7 +737,15 @@ static int gjoin(const GJoin *g,size_t p,size_t k,unsigned xb,size_t h,
             GC(ph_minsum); uint16_t mn=gminsum(a,b,s,d);
             if (mn==GSENT) { GC(ph_psi);
                 if (!best->psi) continue;
-                psi=gpsi(a,b,pc,d,best->psi,scratch);
+#ifdef GPROF_PHASES
+                unsigned long long t0_=__rdtsc();
+#endif
+                uint64_t *wl=scratch+el*W,*wr=scratch+(E1+er)*W;
+                const size_t na=gbits_cached(a,d,wl,lcnt+el),nb=gbits_cached(b,d,wr,rcnt+er);
+                psi=gpsi(wl,na,wr,nb,pc,d,best->psi);
+#ifdef GPROF_PHASES
+                ph_psicyc+=__rdtsc()-t0_;
+#endif
                 if (psi==d) continue;
                 s=pc>=psi?pc-psi:pc+d-psi;
                 mn=gminsum(a,b,s,d);
@@ -605,7 +775,12 @@ static void gfinish(const GJoin *g,size_t p,size_t k,size_t pivot_pos,unsigned x
     const uint16_t *b=gblk(g->rs,g->rlen,g->rh,er)+ru*g->rs->stride;
     size_t j1=0,v2=0;
 #if G_SIMD
-    { /* first residue pair realizing the recorded minimum */
+    if (GPACK(d)) {
+        const __mmask32 m=(__mmask32)((UINT32_C(1)<<d)-1);
+        const __m512i sum=_mm512_adds_epu16(_mm512_maskz_loadu_epi16(m,a),grot16(b,s,d));
+        const __mmask32 eq=_mm512_mask_cmpeq_epu16_mask(m,sum,_mm512_set1_epi16((short)best->mn));
+        j1=(size_t)__builtin_ctz((unsigned)eq); v2=j1+s<d?j1+s:j1+s-d;
+    } else { /* first residue pair realizing the recorded minimum */
         const __m512i sent=_mm512_set1_epi16(-1),want=_mm512_set1_epi16((short)best->mn);
         for (size_t j0=0;j0<d;j0+=32) {
             const __mmask32 m=j0+32<=d?(__mmask32)0xFFFFFFFFu:(__mmask32)((UINT32_C(1)<<(d-j0))-1);
@@ -673,7 +848,7 @@ int subseqhash3_seeds(const uint8_t *s,size_t length,size_t n,
     GTab *lt=calloc(sets,sizeof(*lt)),*rt=calloc(sets,sizeof(*rt));
     SubseqHash3EditResult *res=calloc(slots*total,sizeof(*res));
     GBest *best=calloc(slots*total,sizeof(*best));
-    uint64_t *scratch=malloc((2*((d+63)/64)+8)*sizeof(uint64_t));
+    uint64_t *scratch=malloc((2*(subs+1)*((d+63)/64)+8)*sizeof(uint64_t));
     GCand *cand=malloc(4*(subs+1)*sizeof(GCand));
     GSide *left=calloc(ring*sets,sizeof(GSide)),*right=calloc(ring*sets,sizeof(GSide));
     int status=-1;
